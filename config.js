@@ -6,6 +6,6 @@
  * NEVER put the secret key (sb_secret_…) or your database password in this file.
  */
 window.HABITS_CONFIG = {
-  supabaseUrl: '',            // Project URL, e.g. 'https://abcd1234.supabase.co'
-  supabasePublishableKey: ''  // starts with 'sb_publishable_'
+  supabaseUrl: 'https://klkbnsauiiyquuigtrhe.supabase.co',                  // Project URL
+  supabasePublishableKey: 'sb_publishable_3_ntV_uvFXAKKNgc3BFAOg_9mcevgC6'   // publishable key (safe to publish)
 };
