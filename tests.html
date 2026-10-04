@@ -1,0 +1,986 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>game.js tests</title>
+<style>
+  body { font: 15px/1.4 -apple-system, BlinkMacSystemFont, system-ui, sans-serif; margin: 0; padding: 20px; background: #f2f2f7; color: #000; }
+  @media (prefers-color-scheme: dark) { body { background: #000; color: #fff; } .t { background: #1c1c1e; } }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  #summary { font-weight: 700; margin: 0 0 16px; }
+  #summary.ok { color: #34c759; } #summary.bad { color: #ff3b30; }
+  .t { background: #fff; border-radius: 8px; padding: 8px 12px; margin: 6px 0; }
+  .t.fail { border-left: 4px solid #ff3b30; } .t.pass { border-left: 4px solid #34c759; }
+  .t pre { margin: 6px 0 0; white-space: pre-wrap; color: #ff3b30; font-size: 13px; }
+  .grp { font-weight: 700; margin: 18px 0 4px; color: #8e8e93; text-transform: uppercase; font-size: 12px; letter-spacing: .4px; }
+</style>
+</head>
+<body>
+<h1>game.js unit tests</h1>
+<div id="summary">running…</div>
+<div id="out"></div>
+<script src="game.js"></script>
+<script>
+'use strict';
+// ---------- tiny runner ----------
+const tests = [];
+let currentGroup = '';
+function group(name) { currentGroup = name; }
+function test(name, fn) { tests.push({ group: currentGroup, name, fn }); }
+const assert = {
+  ok(v, msg) { if (!v) throw new Error(msg || `expected truthy, got ${JSON.stringify(v)}`); },
+  equal(a, b, msg) { if (a !== b) throw new Error((msg ? msg + ': ' : '') + `expected ${JSON.stringify(b)}, got ${JSON.stringify(a)}`); },
+  deepEqual(a, b, msg) { const x = JSON.stringify(a), y = JSON.stringify(b); if (x !== y) throw new Error((msg ? msg + ': ' : '') + `expected ${y}, got ${x}`); },
+  throws(fn, msg) { let threw = false; try { fn(); } catch (e) { threw = true; } if (!threw) throw new Error(msg || 'expected an exception'); }
+};
+function run() {
+  const out = document.getElementById('out');
+  let pass = 0, fail = 0, lastGroup = null;
+  const results = [];
+  for (const t of tests) {
+    if (t.group !== lastGroup) { const g = document.createElement('div'); g.className = 'grp'; g.textContent = t.group; out.appendChild(g); lastGroup = t.group; }
+    const el = document.createElement('div');
+    try { t.fn(); pass++; el.className = 't pass'; el.textContent = t.name; results.push({ name: t.group + ' › ' + t.name, ok: true }); }
+    catch (e) { fail++; el.className = 't fail'; el.textContent = t.name; const pre = document.createElement('pre'); pre.textContent = e.stack || String(e); el.appendChild(pre); results.push({ name: t.group + ' › ' + t.name, ok: false, error: String(e.message || e) }); }
+    out.appendChild(el);
+  }
+  const s = document.getElementById('summary');
+  s.textContent = `${pass} passed, ${fail} failed, ${tests.length} total`;
+  s.className = fail ? 'bad' : 'ok';
+  window.__testResults = { pass, fail, total: tests.length, results };
+}
+
+// ---------- fixtures ----------
+const G = Game;
+const D = (y, m, d, h = 12, min = 0) => new Date(y, m - 1, d, h, min, 0);
+let idCounter = 0;
+const idGen = () => 'id' + (++idCounter);
+const T0 = '2026-01-01T00:00:00.000Z';
+// Lists shaped like the v1.0 seeds, so list matching (#tag, capture) has something to match.
+const lists = [['cat_fitness', 'Fitness'], ['cat_learning', 'Learning'], ['cat_career', 'Career'], ['cat_finance', 'Finance'], ['cat_home', 'Home'], ['cat_social', 'Social']]
+  .map(([id, name], i) => ({ id, name, color: 'blue', icon: '📋', sortOrder: i, createdAt: T0 }));
+const skills = G.seedSkills(T0);
+function mkState(items, completions, extra) {
+  return Object.assign({ settings: G.defaultSettings(T0), categories: lists, skills, items: items || [], completions: completions || [], achievements: [] }, extra || {});
+}
+function task(id, extra) { return Object.assign({ id, text: id, notes: '', type: 'task', categoryId: 'cat_home', skillId: null, tier: 2, parentId: null, due: null, repeat: null, timesPerDay: 1, sortOrder: 0, createdAt: null }, extra || {}); }
+function habit(id, days, extra) { return Object.assign({ id, text: id, notes: '', type: 'habit', categoryId: 'cat_fitness', skillId: null, tier: 1, parentId: null, due: null, repeat: { kind: days.length === 7 ? 'daily' : 'custom', days }, timesPerDay: 1, sortOrder: 0, createdAt: null }, extra || {}); }
+const ALL = [0, 1, 2, 3, 4, 5, 6];
+function comp(itemId, dayKey, extra) { return Object.assign({ id: 'c' + (++idCounter), itemId, categoryId: 'cat_fitness', skillId: null, kind: 'habit', dayKey, at: dayKey + 'T12:00:00.000Z', tier: 1, xp: 10, text: itemId }, extra || {}); }
+const skillOf = text => { const r = G.inferSkill(text, skills); return r ? r.skillId : null; };
+
+// ---------- XP & levels ----------
+group('XP and levels');
+test('xpForTier maps 1..5 to 10/25/50/100/200', () => { assert.deepEqual([1, 2, 3, 4, 5].map(G.xpForTier), [10, 25, 50, 100, 200]); });
+test('clampTier clamps and defaults', () => { assert.equal(G.clampTier(0), 1); assert.equal(G.clampTier(9), 5); assert.equal(G.clampTier('x'), 2); assert.equal(G.clampTier(3.4), 3); assert.equal(G.xpForTier(undefined), 25); });
+test('xpForLevel = round(100 · L^1.3)', () => { assert.deepEqual([1, 2, 3, 5, 10, 20].map(G.xpForLevel), [100, 246, 417, 810, 1995, 4913]); });
+test('xpToReachLevel sums the curve', () => { assert.equal(G.xpToReachLevel(1), 0); assert.equal(G.xpToReachLevel(2), 100); assert.equal(G.xpToReachLevel(10), 7694); });
+test('levelFromXp boundaries', () => {
+  assert.deepEqual(G.levelFromXp(0), { level: 1, into: 0, needed: 100, fraction: 0 });
+  assert.equal(G.levelFromXp(99).level, 1);
+  assert.deepEqual(G.levelFromXp(100), { level: 2, into: 0, needed: 246, fraction: 0 });
+  const l = G.levelFromXp(345); assert.equal(l.level, 2); assert.equal(l.into, 245);
+  assert.equal(G.levelFromXp(346).level, 3);
+  assert.equal(G.levelFromXp(7694).level, 10);
+  assert.equal(G.levelFromXp(-50).level, 1);
+  assert.equal(G.levelFromXp('nope').level, 1);
+});
+test('no level cap: large XP resolves', () => { assert.ok(G.levelFromXp(1e8).level > 100); });
+test('xpTotals sums overall, per list and per skill', () => {
+  const t = G.xpTotals([comp('a', '2026-01-01', { xp: 10, categoryId: 'x', skillId: 'sk_clarity' }), comp('b', '2026-01-01', { xp: 25, categoryId: 'y', skillId: null }), comp('c', '2026-01-01', { xp: 5, categoryId: 'x', skillId: 'sk_clarity' })]);
+  assert.deepEqual(t, { overall: 40, byCategory: { x: 15, y: 25 }, bySkill: { sk_clarity: 15 } });
+});
+test('diffLevels reports overall and skill level-ups (lists never level)', () => {
+  const before = { overall: 90, byCategory: { l: 90 }, bySkill: { x: 90 } }, after = { overall: 110, byCategory: { l: 110 }, bySkill: { x: 110, y: 20 } };
+  assert.deepEqual(G.diffLevels(before, after), [{ type: 'levelup', scope: 'overall', id: null, level: 2 }, { type: 'levelup', scope: 'skill', id: 'x', level: 2 }]);
+  assert.deepEqual(G.diffLevels(after, before), []);
+});
+
+// ---------- logical days ----------
+group('Logical days');
+test('dayKey rolls over at the day-start hour', () => {
+  assert.equal(G.dayKey(D(2026, 9, 22, 1, 30), 4), '2026-09-21');
+  assert.equal(G.dayKey(D(2026, 9, 22, 3, 59), 4), '2026-09-21');
+  assert.equal(G.dayKey(D(2026, 9, 22, 4, 0), 4), '2026-09-22');
+  assert.equal(G.dayKey(D(2026, 9, 22, 23, 59), 4), '2026-09-22');
+  assert.equal(G.dayKey(D(2026, 9, 22, 1, 30), 0), '2026-09-22');
+  assert.equal(G.dayKey(D(2026, 1, 1, 2, 0), 4), '2025-12-31');
+});
+test('dayKey defaults to 4 AM and accepts ISO strings', () => { assert.equal(G.dayKey(D(2026, 3, 10, 2)), '2026-03-09'); assert.equal(G.dayKey(D(2026, 3, 10, 2).toISOString(), 4), '2026-03-09'); });
+test('addDays / weekdayOf / daysBetween', () => {
+  assert.equal(G.addDays('2026-01-31', 1), '2026-02-01');
+  assert.equal(G.addDays('2026-03-01', -1), '2026-02-28');
+  assert.equal(G.weekdayOf('2026-09-23'), 3); // Wednesday
+  assert.equal(G.daysBetween('2026-09-20', '2026-09-23'), 3);
+  assert.equal(G.daysBetween('2026-03-07', '2026-03-09'), 2); // across US DST change
+});
+test('parseDay rejects invalid dates', () => { assert.equal(G.parseDay('2026-02-30'), null); assert.equal(G.isDayKey('2026-2-3'), false); assert.equal(G.isDayKey('2026-02-03'), true); });
+test('dueStatus', () => {
+  assert.equal(G.dueStatus(task('a', { due: '2026-09-22' }), '2026-09-23'), 'overdue');
+  assert.equal(G.dueStatus(task('a', { due: '2026-09-23' }), '2026-09-23'), 'today');
+  assert.equal(G.dueStatus(task('a', { due: '2026-09-24' }), '2026-09-23'), 'future');
+  assert.equal(G.dueStatus(task('a'), '2026-09-23'), 'none');
+  assert.equal(G.dueStatus(habit('h', ALL), '2026-09-23'), 'none');
+});
+
+// ---------- schedules ----------
+group('Schedules');
+test('normalizeRepeat: daily has all days, weekly one day, custom sorted unique', () => {
+  assert.deepEqual(G.normalizeRepeat({ kind: 'daily' }), { kind: 'daily', days: ALL });
+  assert.deepEqual(G.normalizeRepeat({ kind: 'weekly' }, '2026-09-23'), { kind: 'weekly', days: [3] });
+  assert.deepEqual(G.normalizeRepeat({ kind: 'weekly', days: [5, 1] }), { kind: 'weekly', days: [5] });
+  assert.deepEqual(G.normalizeRepeat({ kind: 'custom', days: [5, 1, 1, 9, -1] }), { kind: 'custom', days: [1, 5] });
+  assert.deepEqual(G.normalizeRepeat({ kind: 'custom', days: [] }), { kind: 'custom', days: ALL });
+  assert.deepEqual(G.normalizeRepeat({ kind: 'bogus' }), { kind: 'daily', days: ALL });
+  assert.equal(G.normalizeRepeat(null), null);
+});
+test('isScheduledOn / prevScheduledDay', () => {
+  const h = habit('h', [1, 3, 5]);
+  assert.equal(G.isScheduledOn(h, '2026-09-23'), true);  // Wed
+  assert.equal(G.isScheduledOn(h, '2026-09-24'), false); // Thu
+  assert.equal(G.prevScheduledDay(h, '2026-09-24'), '2026-09-23');
+  assert.equal(G.prevScheduledDay(h, '2026-09-23'), '2026-09-21');
+  assert.equal(G.isScheduledOn(task('t'), '2026-09-23'), false);
+});
+test('repeatLabel', () => {
+  assert.equal(G.repeatLabel(null), 'Never');
+  assert.equal(G.repeatLabel({ kind: 'daily', days: ALL }), 'Daily');
+  assert.equal(G.repeatLabel({ kind: 'weekly', days: [1] }), 'Weekly · Mon');
+  assert.equal(G.repeatLabel({ kind: 'custom', days: [1, 2, 3, 4, 5] }), 'Weekdays');
+  assert.equal(G.repeatLabel({ kind: 'custom', days: [0, 6] }), 'Weekends');
+  assert.equal(G.repeatLabel({ kind: 'custom', days: [1, 3] }), 'Mon Wed');
+});
+
+// ---------- skills: inference ----------
+group('Skills: picking a skill');
+test('seed skills: ten, stable ids, editable fields', () => {
+  assert.deepEqual(skills.map(s => s.id), ['sk_strength', 'sk_dexterity', 'sk_endurance', 'sk_vitality', 'sk_clarity', 'sk_learning', 'sk_career', 'sk_wealth', 'sk_social', 'sk_upkeep']);
+  assert.ok(skills.every(s => s.name && s.icon && G.COLORS.includes(s.color) && s.hint));
+});
+test('your examples: journaling → Clarity, lifting → Strength, stretching → Dexterity, reading → Learning', () => {
+  assert.equal(skillOf('Journaling'), 'sk_clarity');
+  assert.equal(skillOf('Lifting'), 'sk_strength');
+  assert.equal(skillOf('Stretching'), 'sk_dexterity');
+  assert.equal(skillOf('Reading'), 'sk_learning');
+});
+test('word forms are matched', () => {
+  assert.equal(skillOf('Journal 10 min'), 'sk_clarity');
+  assert.equal(skillOf('Lift'), 'sk_strength');
+  assert.equal(skillOf('Lifted heavy'), 'sk_strength');
+  assert.equal(skillOf('Stretches'), 'sk_dexterity');
+  assert.equal(skillOf('Meditating'), 'sk_clarity');
+  assert.equal(skillOf('Running'), 'sk_endurance');
+  assert.equal(skillOf('Jogging'), 'sk_endurance');
+  assert.equal(skillOf('Push-ups'), 'sk_strength');
+  assert.equal(skillOf('pushups x50'), 'sk_strength');
+  assert.equal(skillOf("Mom's birthday gift"), 'sk_social');
+});
+test('everyday items land sensibly', () => {
+  const want = { 'Drink water': 'sk_vitality', 'Sleep by 11': 'sk_vitality', 'Take vitamins': 'sk_vitality', 'Meditate': 'sk_clarity', 'Plan week': 'sk_clarity',
+    'Study for Security+': 'sk_learning', 'Read 20 pages': 'sk_learning', 'Update resume': 'sk_career', 'Pay rent': 'sk_wealth', 'Budget review': 'sk_wealth',
+    'Call mom': 'sk_social', 'Text dad': 'sk_social', 'Laundry': 'sk_upkeep', 'Renew passport': 'sk_upkeep', 'Yoga': 'sk_dexterity', 'Swimming laps': 'sk_endurance' };
+  for (const [text, id] of Object.entries(want)) assert.equal(skillOf(text), id, text);
+});
+test('warm-ups and cool-downs count as mobility', () => {
+  assert.equal(skillOf('Warm up'), 'sk_dexterity');
+  assert.equal(skillOf('Cool down stretch'), 'sk_dexterity');
+});
+test('generic verbs yield to the specific word', () => {
+  assert.equal(skillOf('Run errands'), 'sk_upkeep');
+  assert.equal(skillOf('Read emails'), 'sk_career');
+  assert.equal(skillOf('Call dentist'), 'sk_vitality');
+  assert.equal(skillOf('Water plants'), 'sk_upkeep');
+  assert.equal(skillOf('Book flight'), 'sk_upkeep');
+  assert.equal(skillOf('Work out'), 'sk_strength');
+  assert.equal(skillOf('Yoga class'), 'sk_dexterity');
+  assert.equal(skillOf('Make bed'), 'sk_upkeep');
+  assert.equal(skillOf('Clean gym bag'), 'sk_upkeep');
+});
+test('no match, empty input, or no skills → null', () => {
+  assert.equal(skillOf('Gibberish xyz'), null);
+  assert.equal(skillOf(''), null);
+  assert.equal(G.inferSkill('Journal', []), null);
+  assert.equal(G.inferSkill('Journal', null), null);
+  assert.equal(skillOf('update'), null, 'word boundaries: "date" inside "update" must not match');
+});
+test('custom skills match on their name and "what counts" hint', () => {
+  const mine = skills.concat([{ id: 'x', name: 'Creativity', icon: '🎨', color: 'purple', hint: 'guitar, drawing, writing songs' }]);
+  assert.equal(G.inferSkill('Guitar practice', mine).skillId, 'x');
+  assert.equal(G.inferSkill('Drawing', mine).skillId, 'x');
+  assert.equal(G.inferSkill('creativity time', mine).skillId, 'x');
+});
+test('renaming a seed skill keeps its built-in keywords; deleting it removes them', () => {
+  const renamed = skills.map(s => s.id === 'sk_clarity' ? Object.assign({}, s, { name: 'Mind', hint: '' }) : s);
+  assert.equal(G.inferSkill('Journal', renamed).skillId, 'sk_clarity');
+  const without = skills.filter(s => s.id !== 'sk_clarity');
+  assert.ok(G.inferSkill('Journal', without) === null || G.inferSkill('Journal', without).skillId !== 'sk_clarity');
+});
+test('resolveSkill by id, name, or name prefix', () => {
+  assert.equal(G.resolveSkill(skills, 'sk_wealth').id, 'sk_wealth');
+  assert.equal(G.resolveSkill(skills, 'clarity').id, 'sk_clarity');
+  assert.equal(G.resolveSkill(skills, 'Dex').id, 'sk_dexterity');
+  assert.equal(G.resolveSkill(skills, 'nope'), null);
+  assert.equal(G.resolveSkill(skills, ''), null);
+});
+
+// ---------- completion planning ----------
+group('Completing');
+test('task completes once with snapshot fields, including its skill', () => {
+  const st = mkState([task('t', { tier: 3, text: 'Renew passport', skillId: 'sk_upkeep' })]);
+  const plan = G.planComplete(st, 't', D(2026, 9, 23, 12), { idGen });
+  assert.equal(plan.completions.length, 1);
+  const c = plan.completions[0];
+  assert.equal(c.kind, 'task'); assert.equal(c.xp, 50); assert.equal(c.tier, 3); assert.equal(c.categoryId, 'cat_home'); assert.equal(c.skillId, 'sk_upkeep'); assert.equal(c.dayKey, '2026-09-23'); assert.equal(c.text, 'Renew passport');
+  assert.deepEqual(plan.inferred, []);
+  st.completions.push(...plan.completions);
+  assert.equal(G.planComplete(st, 't', D(2026, 9, 23, 13), { idGen }).completions.length, 0, 'second check is a no-op');
+});
+test('an item with no skill gets one decided at check-off', () => {
+  const st = mkState([task('t', { text: 'Journal before bed' })]);
+  const plan = G.planComplete(st, 't', D(2026, 9, 23), { idGen });
+  assert.equal(plan.completions[0].skillId, 'sk_clarity');
+  assert.deepEqual(plan.inferred, [{ itemId: 't', skillId: 'sk_clarity' }]);
+});
+test('sub-tasks boost their own skill; unmatched ones fall back to the parent', () => {
+  const st = mkState([
+    habit('p', ALL, { text: 'Morning routine', skillId: 'sk_clarity', tier: 2 }),
+    task('a', { parentId: 'p', type: 'habit', text: 'Stretch' }),
+    task('b', { parentId: 'p', type: 'habit', text: 'Push-ups', skillId: 'sk_strength' }),
+    task('c', { parentId: 'p', type: 'habit', text: 'Something odd' })
+  ]);
+  const plan = G.planComplete(st, 'p', D(2026, 9, 23), { idGen });
+  assert.deepEqual(plan.completions.map(c => c.itemId + ':' + c.skillId), ['a:sk_dexterity', 'b:sk_strength', 'c:sk_clarity', 'p:sk_clarity']);
+  assert.deepEqual(plan.inferred, [{ itemId: 'a', skillId: 'sk_dexterity' }, { itemId: 'c', skillId: 'sk_clarity' }]);
+});
+test('habit completes once per logical day, again the next day', () => {
+  const st = mkState([habit('h', ALL)]);
+  st.completions.push(...G.planComplete(st, 'h', D(2026, 9, 23, 12), { idGen }).completions);
+  assert.equal(G.planComplete(st, 'h', D(2026, 9, 24, 1), { idGen }).completions.length, 0, '1 AM is still the same logical day');
+  assert.equal(G.planComplete(st, 'h', D(2026, 9, 24, 9), { idGen }).completions.length, 1);
+});
+test('habit with timesPerDay 3 allows three check-ins then stops', () => {
+  const st = mkState([habit('h', ALL, { timesPerDay: 3 })]);
+  for (let i = 0; i < 3; i++) { const p = G.planComplete(st, 'h', D(2026, 9, 23, 12 + i), { idGen }); assert.equal(p.completions.length, 1); st.completions.push(...p.completions); }
+  assert.equal(G.planComplete(st, 'h', D(2026, 9, 23, 16), { idGen }).completions.length, 0);
+  assert.deepEqual(G.doneState(st.items[0], G.byId(st.items), G.indexCompletions(st.completions), '2026-09-23'), { done: true, count: 3, target: 3 });
+});
+test('unscheduled-day habit check-in still awards XP', () => {
+  const st = mkState([habit('h', [1])]); // Mondays only
+  assert.equal(G.planComplete(st, 'h', D(2026, 9, 23, 12), { idGen }).completions.length, 1); // Wednesday
+});
+test('last open sub-task auto-completes the parent', () => {
+  const st = mkState([task('p', { tier: 3 }), task('a', { parentId: 'p', tier: 1 }), task('b', { parentId: 'p', tier: 2 })]);
+  const p1 = G.planComplete(st, 'a', D(2026, 9, 23), { idGen });
+  assert.equal(p1.completions.length, 1); assert.equal(p1.parentAutoCompleted, false); assert.equal(p1.completions[0].kind, 'subtask');
+  st.completions.push(...p1.completions);
+  const p2 = G.planComplete(st, 'b', D(2026, 9, 23), { idGen });
+  assert.equal(p2.parentAutoCompleted, true);
+  assert.deepEqual(p2.completions.map(c => c.itemId + ':' + c.kind + ':' + c.xp), ['b:subtask:25', 'p:task:50']);
+});
+test('completing a parent completes its open sub-tasks too', () => {
+  const st = mkState([task('p', { tier: 2 }), task('a', { parentId: 'p', tier: 1 }), task('b', { parentId: 'p', tier: 1 })]);
+  st.completions.push(...G.planComplete(st, 'a', D(2026, 9, 23), { idGen }).completions);
+  const p = G.planComplete(st, 'p', D(2026, 9, 23), { idGen });
+  assert.deepEqual(p.completions.map(c => c.itemId + ':' + c.kind), ['b:subtask', 'p:task']);
+});
+test('sub-tasks file their completion under the parent\'s list', () => {
+  const st = mkState([task('p', { categoryId: 'cat_career' }), task('a', { parentId: 'p', categoryId: 'cat_home' })]);
+  assert.equal(G.planComplete(st, 'a', D(2026, 9, 23), { idGen }).completions[0].categoryId, 'cat_career');
+});
+test('habit sub-tasks reset daily and cascade per day', () => {
+  const st = mkState([habit('h', ALL, { tier: 2 }), task('s', { parentId: 'h', type: 'habit', tier: 1 })]);
+  const p1 = G.planComplete(st, 's', D(2026, 9, 23), { idGen });
+  assert.deepEqual(p1.completions.map(c => c.itemId + ':' + c.kind), ['s:subtask', 'h:habit']);
+  st.completions.push(...p1.completions);
+  assert.equal(G.planComplete(st, 's', D(2026, 9, 23, 18), { idGen }).completions.length, 0);
+  const p2 = G.planComplete(st, 's', D(2026, 9, 24), { idGen });
+  assert.equal(p2.completions.length, 2, 'next day both open again');
+});
+test('unknown item yields an empty plan', () => { assert.deepEqual(G.planComplete(mkState([]), 'zzz', D(2026, 9, 23)).completions, []); });
+test('planUncomplete: task removes its completion, habit removes only today\'s latest', () => {
+  const st = mkState([task('t'), habit('h', ALL, { timesPerDay: 2 })], [comp('t', '2026-09-22', { kind: 'task', id: 'ct' }), comp('h', '2026-09-22', { id: 'c1' }), comp('h', '2026-09-23', { id: 'c2', at: '2026-09-23T10:00:00.000Z' }), comp('h', '2026-09-23', { id: 'c3', at: '2026-09-23T11:00:00.000Z' })]);
+  assert.deepEqual(G.planUncomplete(st, 't', D(2026, 9, 23)).removeCompletionIds, ['ct']);
+  assert.deepEqual(G.planUncomplete(st, 'h', D(2026, 9, 23)).removeCompletionIds, ['c3']);
+  assert.deepEqual(G.planUncomplete(st, 'h', D(2026, 9, 25)).removeCompletionIds, []);
+});
+test('completionsToReassign: an item\'s whole history follows its current skill', () => {
+  const cs = [comp('h', '2026-09-21', { skillId: 'sk_learning' }), comp('h', '2026-09-22', { skillId: null }), comp('h', '2026-09-23', { skillId: 'sk_clarity' }), comp('other', '2026-09-23', { skillId: 'sk_learning' })];
+  assert.deepEqual(G.completionsToReassign(cs, 'h', 'sk_clarity').map(c => c.dayKey), ['2026-09-21', '2026-09-22']);
+  assert.equal(G.completionsToReassign(cs, 'h', null).length, 2);
+});
+
+// ---------- streaks ----------
+group('Streaks');
+const idx = comps => G.indexCompletions(comps);
+test('consecutive daily completions', () => {
+  const h = habit('h', ALL);
+  const s = G.streak(h, idx(['2026-09-20', '2026-09-21', '2026-09-22'].map(d => comp('h', d))), '2026-09-22');
+  assert.deepEqual(s, { current: 3, best: 3 });
+});
+test('today not yet done keeps the streak alive; tomorrow it is broken', () => {
+  const h = habit('h', ALL);
+  const cs = ['2026-09-20', '2026-09-21', '2026-09-22'].map(d => comp('h', d));
+  assert.equal(G.streak(h, idx(cs), '2026-09-23').current, 3);
+  assert.equal(G.streak(h, idx(cs), '2026-09-24').current, 0);
+  assert.equal(G.streak(h, idx(cs), '2026-09-24').best, 3);
+});
+test('unscheduled days neither break nor extend', () => {
+  const h = habit('h', [1, 3, 5]); // Mon Wed Fri
+  const cs = ['2026-09-14', '2026-09-16', '2026-09-17', '2026-09-18'].map(d => comp('h', d)); // Mon Wed Thu(unsched) Fri
+  assert.deepEqual(G.streak(h, idx(cs), '2026-09-19'), { current: 3, best: 3 }); // Saturday
+  assert.equal(G.streak(h, idx(cs), '2026-09-21').current, 3, 'Monday not yet done');
+  assert.equal(G.streak(h, idx(cs), '2026-09-22').current, 0, 'Monday missed');
+});
+test('a missed scheduled day breaks the run; best remembers the longest', () => {
+  const h = habit('h', ALL);
+  const cs = ['2026-09-10', '2026-09-11', '2026-09-12', '2026-09-14', '2026-09-15'].map(d => comp('h', d));
+  assert.deepEqual(G.streak(h, idx(cs), '2026-09-15'), { current: 2, best: 3 });
+});
+test('multi-target habits count a day only when the target is hit', () => {
+  const h = habit('h', ALL, { timesPerDay: 2 });
+  const cs = [comp('h', '2026-09-21'), comp('h', '2026-09-21'), comp('h', '2026-09-22')];
+  assert.deepEqual(G.streak(h, idx(cs), '2026-09-22'), { current: 1, best: 1 });
+});
+test('weekly schedule streak spans weeks', () => {
+  const h = habit('h', [1], { repeat: { kind: 'weekly', days: [1] } });
+  const cs = ['2026-09-07', '2026-09-14', '2026-09-21'].map(d => comp('h', d));
+  assert.equal(G.streak(h, idx(cs), '2026-09-23').current, 3);
+});
+test('tasks and sub-tasks have no streak', () => { assert.deepEqual(G.streak(task('t'), idx([]), '2026-09-23'), { current: 0, best: 0 }); });
+
+// ---------- achievements ----------
+group('Achievements');
+test('nextThreshold follows the ladder then doubles', () => {
+  assert.deepEqual([0, 7, 10, 24, 25, 999, 1000, 1500, 4000].map(G.nextThreshold), [10, 10, 25, 25, 50, 1000, 2000, 2000, 8000]);
+});
+function ach(extra) { return Object.assign({ id: 'a' + (++idCounter), name: 'Do {n}', icon: '⭐', kind: 'count', metric: 'completions', scope: { type: 'all' }, threshold: 10, autoTier: true, seriesId: 's', tier: 1, unlockedAt: null, createdAt: null }, extra || {}); }
+test('count achievement unlocks and auto-creates the next tier', () => {
+  const st = mkState([task('t')], Array.from({ length: 10 }, (_, i) => comp('t', '2026-09-0' + ((i % 9) + 1), { kind: 'task' })), { achievements: [ach()] });
+  const r = G.checkAchievements(st, D(2026, 9, 23), { idGen });
+  assert.equal(r.unlocked.length, 1); assert.ok(r.unlocked[0].unlockedAt);
+  assert.equal(r.created.length, 1); assert.equal(r.created[0].threshold, 25); assert.equal(r.created[0].tier, 2); assert.equal(r.created[0].unlockedAt, null); assert.equal(r.created[0].seriesId, 's');
+  assert.equal(st.achievements[0].unlockedAt, null, 'input state is not mutated');
+});
+test('a big jump clears several tiers in one check', () => {
+  const st = mkState([task('t')], Array.from({ length: 60 }, () => comp('t', '2026-09-01', { kind: 'task' })), { achievements: [ach()] });
+  const r = G.checkAchievements(st, D(2026, 9, 23), { idGen });
+  assert.deepEqual(r.unlocked.map(a => a.threshold), [10, 25, 50]);
+  assert.deepEqual(r.created.map(a => a.threshold), [25, 50, 100]);
+});
+test('auto-tier copies do not inherit the seed key', () => {
+  const st = mkState([task('t')], Array.from({ length: 10 }, () => comp('t', '2026-09-01', { kind: 'task' })), { achievements: [ach({ seedKey: 'getting-started' })] });
+  const r = G.checkAchievements(st, D(2026, 9, 23), { idGen });
+  assert.equal(r.created[0].seedKey, undefined);
+});
+test('autoTier false creates nothing; already unlocked is skipped', () => {
+  const st = mkState([task('t')], Array.from({ length: 10 }, () => comp('t', '2026-09-01', { kind: 'task' })), { achievements: [ach({ autoTier: false }), ach({ unlockedAt: '2026-01-01T00:00:00.000Z' })] });
+  const r = G.checkAchievements(st, D(2026, 9, 23), { idGen });
+  assert.equal(r.unlocked.length, 1); assert.equal(r.created.length, 0);
+});
+test('metric and scope filters (all, list, skill, item)', () => {
+  const st = mkState([task('t'), habit('h', ALL, { categoryId: 'cat_fitness' })], [comp('t', '2026-09-01', { kind: 'task', categoryId: 'cat_home', skillId: 'sk_upkeep' }), comp('h', '2026-09-01', { skillId: 'sk_clarity' }), comp('h', '2026-09-02', { skillId: 'sk_clarity' }), comp('t', '2026-09-01', { kind: 'subtask', categoryId: 'cat_home' })]);
+  const ctx = G.achievementContext(st, D(2026, 9, 23));
+  assert.equal(G.achievementProgress(ach({ metric: 'completions' }), ctx).value, 4);
+  assert.equal(G.achievementProgress(ach({ metric: 'habits' }), ctx).value, 2);
+  assert.equal(G.achievementProgress(ach({ metric: 'tasks' }), ctx).value, 1);
+  assert.equal(G.achievementProgress(ach({ metric: 'subtasks' }), ctx).value, 1);
+  assert.equal(G.achievementProgress(ach({ scope: { type: 'category', id: 'cat_home' } }), ctx).value, 2);
+  assert.equal(G.achievementProgress(ach({ scope: { type: 'skill', id: 'sk_clarity' } }), ctx).value, 2);
+  assert.equal(G.achievementProgress(ach({ scope: { type: 'item', id: 'h' } }), ctx).value, 2);
+});
+test('streak achievements use the max current streak (or a specific habit or skill)', () => {
+  const st = mkState([habit('a', ALL, { skillId: 'sk_clarity' }), habit('b', ALL, { skillId: 'sk_strength' })], [comp('a', '2026-09-22'), comp('a', '2026-09-23'), comp('b', '2026-09-23')]);
+  const ctx = G.achievementContext(st, D(2026, 9, 23));
+  assert.equal(G.achievementProgress(ach({ kind: 'streak', threshold: 2 }), ctx).value, 2);
+  assert.equal(G.achievementProgress(ach({ kind: 'streak', scope: { type: 'item', id: 'b' } }), ctx).value, 1);
+  assert.equal(G.achievementProgress(ach({ kind: 'streak', scope: { type: 'skill', id: 'sk_strength' } }), ctx).value, 1);
+  const r = G.checkAchievements(Object.assign(st, { achievements: [ach({ kind: 'streak', threshold: 2 })] }), D(2026, 9, 23), { idGen });
+  assert.equal(r.unlocked.length, 1); assert.equal(r.created[0].threshold, 10);
+});
+test('level achievements: overall, one skill, highest skill, every skill', () => {
+  const st = mkState([task('t')], [comp('t', '2026-09-01', { kind: 'task', xp: 120, skillId: 'sk_upkeep' }), comp('t', '2026-09-02', { kind: 'task', xp: 30, skillId: 'sk_clarity' })]);
+  const ctx = G.achievementContext(st, D(2026, 9, 23));
+  assert.equal(G.achievementProgress(ach({ kind: 'level', threshold: 2 }), ctx).value, 2);
+  assert.equal(G.achievementProgress(ach({ kind: 'level', scope: { type: 'skill', id: 'sk_upkeep' } }), ctx).value, 2);
+  assert.equal(G.achievementProgress(ach({ kind: 'level', scope: { type: 'skill', id: 'sk_clarity' } }), ctx).value, 1);
+  assert.equal(G.achievementProgress(ach({ kind: 'level', scope: { type: 'anySkill' } }), ctx).value, 2);
+  assert.equal(G.achievementProgress(ach({ kind: 'level', scope: { type: 'everySkill' } }), ctx).value, 1);
+  const noSkills = G.achievementContext(mkState([], [], { skills: [] }), D(2026, 9, 23));
+  assert.equal(G.achievementProgress(ach({ kind: 'level', scope: { type: 'everySkill' }, threshold: 1 }), noSkills).value, 0, 'no skills never unlocks Well-Rounded');
+  const r = G.checkAchievements(Object.assign(st, { achievements: [ach({ kind: 'level', threshold: 2, autoTier: true })] }), D(2026, 9, 23), { idGen });
+  assert.equal(r.unlocked.length, 1); assert.equal(r.created.length, 0, 'level achievements never auto-tier');
+});
+test('manual achievements never auto-unlock', () => {
+  const r = G.checkAchievements(mkState([], [], { achievements: [ach({ kind: 'manual', threshold: 1 })] }), D(2026, 9, 23), { idGen });
+  assert.equal(r.unlocked.length, 0);
+});
+test('achievementName templating', () => {
+  assert.equal(G.achievementName({ name: 'Do {n} things', threshold: 25 }), 'Do 25 things');
+  assert.equal(G.achievementName({ name: 'Plain', threshold: 25, tier: 1 }), 'Plain');
+  assert.equal(G.achievementName({ name: 'Plain', threshold: 25, tier: 2 }), 'Plain (25)');
+});
+test('seeded achievements are well-formed and include the skill ones', () => {
+  const seeds = G.seedAchievements(T0, idGen);
+  assert.equal(seeds.length, 9);
+  assert.ok(seeds.every(a => a.id && a.seriesId && a.seedKey && a.threshold >= 1 && a.unlockedAt === null));
+  assert.equal(seeds.filter(a => a.autoTier).length, 5);
+  assert.deepEqual(seeds.filter(a => a.scope.type === 'anySkill' || a.scope.type === 'everySkill').map(a => a.seedKey), ['specialist', 'well-rounded']);
+});
+
+// ---------- quick entry ----------
+group('Quick entry');
+const TK = '2026-09-23'; // Wednesday
+test('tier, list, date tokens are stripped and parsed', () => {
+  const p = G.parseQuickEntry('Run 5k !3 #fit @tomorrow', lists, TK, skills);
+  assert.equal(p.text, 'Run 5k'); assert.equal(p.tier, 3); assert.equal(p.categoryId, 'cat_fitness'); assert.equal(p.due, '2026-09-24'); assert.equal(p.repeat, null); assert.equal(p.skillId, null);
+  assert.deepEqual(p.tokens, ['!3', '#fit', '@tomorrow']);
+});
+test('+skill sets the skill by name prefix', () => {
+  const p = G.parseQuickEntry('Evening walk +clar', lists, TK, skills);
+  assert.equal(p.text, 'Evening walk'); assert.equal(p.skillId, 'sk_clarity'); assert.deepEqual(p.tokens, ['+clar']);
+  assert.equal(G.parseQuickEntry('a +Dexterity', lists, TK, skills).skillId, 'sk_dexterity');
+  assert.equal(G.parseQuickEntry('Score +1 point +zzz', lists, TK, skills).text, 'Score +1 point +zzz');
+  assert.equal(G.parseQuickEntry('a +clar', lists, TK).skillId, null, 'without skills the token stays');
+});
+test('unrecognized tokens stay in the text', () => {
+  const p = G.parseQuickEntry('Email #nobody @someday !9 x1', lists, TK, skills);
+  assert.equal(p.text, 'Email #nobody @someday !9 x1'); assert.equal(p.tier, null); assert.equal(p.categoryId, null); assert.equal(p.due, null); assert.equal(p.timesPerDay, null);
+});
+test('list match is case-insensitive prefix on the squashed name', () => {
+  const extra = lists.concat([{ id: 'x', name: 'Side Projects' }]);
+  assert.equal(G.parseQuickEntry('a #SIDEPRO', extra, TK).categoryId, 'x');
+  assert.equal(G.parseQuickEntry('a #side', extra, TK).categoryId, 'x');
+  assert.equal(G.parseQuickEntry('a #f', lists, TK).categoryId, 'cat_fitness', 'first match in list order');
+});
+test('^repeat makes a habit and clears any due date', () => {
+  const p = G.parseQuickEntry('Gym ^mon,wed,fri @tomorrow', lists, TK);
+  assert.deepEqual(p.repeat, { kind: 'custom', days: [1, 3, 5] }); assert.equal(p.due, null); assert.equal(p.text, 'Gym');
+  assert.deepEqual(G.parseQuickEntry('a ^daily', lists, TK).repeat, { kind: 'daily', days: ALL });
+  assert.deepEqual(G.parseQuickEntry('a ^weekly', lists, TK).repeat, { kind: 'weekly', days: [3] });
+  assert.deepEqual(G.parseQuickEntry('a ^weekdays', lists, TK).repeat, { kind: 'custom', days: [1, 2, 3, 4, 5] });
+  assert.deepEqual(G.parseQuickEntry('a ^weekends', lists, TK).repeat, { kind: 'custom', days: [0, 6] });
+  assert.equal(G.parseQuickEntry('a ^sometimes', lists, TK).repeat, null);
+  assert.equal(G.parseQuickEntry('a ^mon,funday', lists, TK).repeat, null, 'partially valid day lists are rejected');
+});
+test('xN sets timesPerDay and implies a daily habit', () => {
+  const p = G.parseQuickEntry('Water x8', lists, TK);
+  assert.equal(p.timesPerDay, 8); assert.deepEqual(p.repeat, { kind: 'daily', days: ALL }); assert.equal(p.text, 'Water');
+  assert.equal(G.parseQuickEntry('Water ×3 ^weekdays', lists, TK).repeat.kind, 'custom');
+  assert.equal(G.parseQuickEntry('Buy 2x4 boards', lists, TK).text, 'Buy 2x4 boards');
+});
+test('date tokens', () => {
+  assert.equal(G.parseDateToken('today', TK), TK);
+  assert.equal(G.parseDateToken('tmr', TK), '2026-09-24');
+  assert.equal(G.parseDateToken('wed', TK), TK, 'same weekday = today');
+  assert.equal(G.parseDateToken('thu', TK), '2026-09-24');
+  assert.equal(G.parseDateToken('tuesday', TK), '2026-09-29');
+  assert.equal(G.parseDateToken('2026-10-03', TK), '2026-10-03');
+  assert.equal(G.parseDateToken('10/3', TK), '2026-10-03');
+  assert.equal(G.parseDateToken('1/5', TK), '2027-01-05', 'past M/D rolls to next year');
+  assert.equal(G.parseDateToken('12/25/26', TK), '2026-12-25');
+  assert.equal(G.parseDateToken('2/30', TK), null);
+  assert.equal(G.parseDateToken('nope', TK), null);
+});
+test('empty and whitespace input', () => { const p = G.parseQuickEntry('   ', lists, TK, skills); assert.equal(p.text, ''); assert.deepEqual(p.tokens, []); });
+
+// ---------- AI: skill check ----------
+group('AI skill check');
+test('buildSkillRequest forces assign_skills and sends skills + item text only', () => {
+  const items = [habit('p', ALL, { text: 'Morning routine', notes: 'private note' }), task('s', { parentId: 'p', text: 'x'.repeat(300) })];
+  const req = G.buildSkillRequest('claude-haiku-4-5-20251001', skills, items, G.byId(items));
+  assert.equal(req.model, 'claude-haiku-4-5-20251001');
+  assert.deepEqual(req.tool_choice, { type: 'tool', name: 'assign_skills' });
+  assert.equal(req.tools[0].name, 'assign_skills');
+  const payload = JSON.parse(req.messages[0].content);
+  assert.equal(payload.skills.length, 10); assert.ok(payload.skills[0].hint);
+  assert.deepEqual(payload.items[0], { id: 'p', text: 'Morning routine', type: 'habit' });
+  assert.equal(payload.items[1].type, 'subtask'); assert.equal(payload.items[1].parent, 'Morning routine'); assert.equal(payload.items[1].text.length, 160);
+  assert.ok(!req.messages[0].content.includes('private note'), 'notes are never sent');
+});
+test('parseSkillResponse keeps valid pairs once, resolves names, ignores strangers', () => {
+  const resp = { content: [{ type: 'text', text: 'ok' }, { type: 'tool_use', name: 'assign_skills', input: { assignments: [
+    { id: 'a', skill_id: 'sk_upkeep' }, { id: 'b', skill_id: 'Clarity' }, { id: 'zz', skill_id: 'sk_upkeep' }, { id: 'a', skill_id: 'sk_social' }, { id: 'c', skill_id: 'nope' }, null] } }] };
+  assert.deepEqual(G.parseSkillResponse(resp, skills, ['a', 'b', 'c']), [{ id: 'a', skillId: 'sk_upkeep' }, { id: 'b', skillId: 'sk_clarity' }]);
+  assert.equal(G.parseSkillResponse({ content: [{ type: 'text', text: 'hi' }] }, skills, ['a']), null);
+  assert.equal(G.parseSkillResponse(null, skills, ['a']), null);
+});
+
+// ---------- AI: capture ----------
+group('AI capture');
+test('extractJson finds the first object in prose and fences', () => {
+  assert.deepEqual(G.extractJson('Sure!\n```json\n{"items":[{"text":"a {b}"}],"unreadable":[]}\n```\nDone'), { items: [{ text: 'a {b}' }], unreadable: [] });
+  assert.deepEqual(G.extractJson('{"a":"\\"}{"}'), { a: '"}{' });
+  assert.equal(G.extractJson('no json here'), null);
+  assert.equal(G.extractJson('{"broken":'), null);
+});
+test('normalizeText / findDuplicate ignore punctuation, case and stop words', () => {
+  assert.equal(G.normalizeText('Call the Dentist!'), 'call dentist');
+  const active = [task('t1', { text: 'Renew my passport' }), task('t2', { text: 'Gym' })];
+  assert.equal(G.findDuplicate('renew passport', active).id, 't1');
+  assert.equal(G.findDuplicate('Gym!!', active).id, 't2');
+  assert.equal(G.findDuplicate('Gym membership', active), null);
+  assert.equal(G.findDuplicate('', active), null);
+});
+test('normalizeCapture maps lists by id, name, prefix, or default (old category keys too)', () => {
+  const r = G.normalizeCapture({ items: [
+    { text: 'A', type: 'task', list_id: 'cat_home', skill_id: 'sk_upkeep', tier: 3, duplicate_of_id: null },
+    { text: 'B', type: 'habit', list: 'learning', skill: 'Learning', tier: 9, times_per_day: 500 },
+    { text: 'C', type: 'task', category: 'Fin', tier: 0 },
+    { text: 'D', type: 'weird', category_id: 'cat_social', list: 'nope', tier: 'x' },
+    { text: 'E', type: 'task', list: 'nope' },
+    { text: '   ', type: 'task', list: 'Home' },
+    'garbage'
+  ], unreadable: [{ best_guess: 'x?' }, 'plain string', { best_guess: '' }] }, lists, skills, 'cat_social', []);
+  assert.deepEqual(r.items.map(i => [i.text, i.type, i.categoryId, i.tier, i.timesPerDay]), [
+    ['A', 'task', 'cat_home', 3, 1], ['B', 'habit', 'cat_learning', 5, 99], ['C', 'task', 'cat_finance', 1, 1], ['D', 'task', 'cat_social', 2, 1], ['E', 'task', 'cat_social', 2, 1]
+  ]);
+  assert.deepEqual(r.unreadable, [{ bestGuess: 'x?' }, { bestGuess: 'plain string' }]);
+});
+test('normalizeCapture takes the model\'s skill, else guesses locally, else none', () => {
+  const r = G.normalizeCapture({ items: [
+    { text: 'Journal', type: 'habit', list: 'Fitness', skill_id: 'sk_clarity', tier: 1 },
+    { text: 'Stretch', type: 'habit', list: 'Fitness', skill: 'Dex', tier: 1 },
+    { text: 'Read 20 pages', type: 'habit', list: 'Fitness', skill: 'Bogus', tier: 1 },
+    { text: 'Qwerty', type: 'task', list: 'Fitness', tier: 1 }
+  ] }, lists, skills, 'cat_fitness', []);
+  assert.deepEqual(r.items.map(i => [i.skillId, i.skillSource]), [['sk_clarity', 'ai'], ['sk_dexterity', 'ai'], ['sk_learning', 'auto'], [null, null]]);
+});
+test('normalizeCapture keeps valid duplicate ids, drops unknown ones, and adds local matches', () => {
+  const active = [task('t1', { text: 'Gym' })];
+  const r = G.normalizeCapture({ items: [{ text: 'Gym', type: 'task', list: 'Home', tier: 2, duplicate_of_id: 'zzz' }, { text: 'gym', type: 'task', list: 'Home', tier: 2, duplicate_of_id: 't1' }, { text: 'Other', type: 'task', list: 'Home', tier: 2 }] }, lists, skills, 'cat_home', active);
+  assert.deepEqual(r.items.map(i => i.duplicateOfId), ['t1', 't1', null]);
+});
+test('buildCaptureRequest has the right shape (lists + skills)', () => {
+  const req = G.buildCaptureRequest('claude-sonnet-5', 'AAAA', 'image/jpeg', lists, skills, [task('t1', { text: 'x'.repeat(200) })], 'cat_home');
+  assert.equal(req.model, 'claude-sonnet-5'); assert.equal(req.max_tokens, 4096);
+  assert.deepEqual(req.tool_choice, { type: 'tool', name: 'record_items' }); assert.equal(req.tools[0].name, 'record_items');
+  assert.deepEqual(req.tools[0].input_schema.required, ['items', 'unreadable']);
+  assert.deepEqual(req.tools[0].input_schema.properties.items.items.required, ['text', 'type', 'list_id', 'skill_id', 'tier', 'duplicate_of_id']);
+  const [img, txt] = req.messages[0].content;
+  assert.equal(img.type, 'image'); assert.equal(img.source.data, 'AAAA'); assert.equal(img.source.media_type, 'image/jpeg');
+  const ctx = JSON.parse(txt.text);
+  assert.equal(ctx.lists.length, 6); assert.equal(ctx.skills.length, 10); assert.ok(ctx.skills[4].hint.includes('journaling'));
+  assert.equal(ctx.active_items[0].text.length, 80); assert.equal(ctx.active_items[0].list_id, 'cat_home'); assert.equal(ctx.opened_from_list_id, 'cat_home'); assert.equal(ctx.tier_rubric['1'], 'under 5 min');
+  assert.ok(req.system.includes('unreadable') && req.system.includes('skill'));
+});
+test('captureContext caps active items at the 300 most recent', () => {
+  const many = Array.from({ length: 350 }, (_, i) => task('t' + i));
+  const ctx = G.captureContext(lists, skills, many, null);
+  assert.equal(ctx.active_items.length, 300); assert.equal(ctx.active_items[0].id, 't50');
+});
+test('parseCaptureResponse extracts the tool input or returns null', () => {
+  assert.deepEqual(G.parseCaptureResponse({ content: [{ type: 'text', text: 'hi' }, { type: 'tool_use', name: 'record_items', input: { items: [], unreadable: [] } }] }), { items: [], unreadable: [] });
+  assert.equal(G.parseCaptureResponse({ content: [{ type: 'text', text: 'hi' }] }), null);
+  assert.equal(G.parseCaptureResponse(null), null);
+});
+test('buildPastePrompt lists lists, skills with hints, rubric and the JSON contract', () => {
+  const p = G.buildPastePrompt(lists, skills);
+  assert.ok(p.includes('Fitness, Learning, Career, Finance, Home, Social'));
+  assert.ok(p.includes('Clarity (journaling'));
+  assert.ok(p.includes('"skill":"Upkeep"') && p.includes('"list":"Fitness"'));
+  assert.ok(p.includes('5 = major effort'));
+});
+
+// ---------- seeds, normalization, migration, backup ----------
+group('Seeds, migration, backup');
+test('fresh install seeds one Reminders list and the default settings', () => {
+  assert.deepEqual(G.seedLists(T0).map(c => [c.id, c.name]), [['list_reminders', 'Reminders']]);
+  const s = G.defaultSettings('now');
+  assert.equal(s.dayStartHour, 4); assert.equal(s.defaultCategoryId, 'list_reminders'); assert.equal(s.model, 'claude-sonnet-5');
+  assert.equal(s.aiSkillCheck, true); assert.equal(s.schemaVersion, 3); assert.equal(s.firstLaunchAt, 'now'); assert.equal(s.onboarded, false);
+  assert.deepEqual(s.pages, { planner: true, habits: true, review: true }); assert.deepEqual(s.coreValues, []);
+  assert.deepEqual(G.seedLists(T0).map(c => [c.days, c.showOnPlanner]), [[null, true]]);
+});
+test('normalizeItem coerces types, tiers, repeat, timesPerDay and skill fields', () => {
+  const t = G.normalizeItem({ id: 'a', text: 'x', type: 'task', tier: 8, due: '2026-02-30', repeat: { kind: 'daily' }, timesPerDay: 5, skillId: 'sk_x', skillSource: 'bogus' }, TK);
+  assert.equal(t.tier, 5); assert.equal(t.due, null); assert.equal(t.repeat, null); assert.equal(t.timesPerDay, 1); assert.equal(t.skillId, 'sk_x'); assert.equal(t.skillSource, null); assert.equal(t.aiCheckedAt, null);
+  const h = G.normalizeItem({ id: 'b', text: 'y', type: 'habit', timesPerDay: 0, skillSource: 'user' }, TK);
+  assert.deepEqual(h.repeat, { kind: 'daily', days: ALL }); assert.equal(h.timesPerDay, 1); assert.equal(h.due, null); assert.equal(h.skillSource, 'user');
+});
+function v1Data() {
+  return {
+    settings: { id: 'settings', dayStartHour: 4, defaultCategoryId: 'cat_fitness', model: 'claude-sonnet-5', schemaVersion: 1, onboarded: true },
+    categories: lists.slice(0, 5),
+    items: [
+      { id: 'i1', text: 'Gym', type: 'habit', categoryId: 'cat_fitness', tier: 3, repeat: { kind: 'daily' } },
+      { id: 'i2', text: 'Morning routine', type: 'habit', categoryId: 'cat_fitness', tier: 2, repeat: { kind: 'daily' } },
+      { id: 'i3', text: 'Set 1', type: 'habit', categoryId: 'cat_fitness', parentId: 'i2', tier: 1 },
+      { id: 'i4', text: 'Vacuum', type: 'task', categoryId: 'cat_home', tier: 2 },
+      { id: 'i5', text: 'Journal', type: 'habit', categoryId: 'cat_learning', tier: 1, repeat: { kind: 'daily' } }
+    ],
+    completions: [
+      { id: 'c1', itemId: 'i1', categoryId: 'cat_fitness', kind: 'habit', dayKey: '2026-09-25', xp: 50, tier: 3, text: 'Gym' },
+      { id: 'c2', itemId: 'gone', categoryId: 'cat_learning', kind: 'task', dayKey: '2026-09-25', xp: 25, tier: 2, text: 'Read chapter 3' },
+      { id: 'c3', itemId: 'gone2', categoryId: 'cat_home', kind: 'task', dayKey: '2026-09-25', xp: 25, tier: 2, text: 'zzz' },
+      { id: 'c4', itemId: 'i5', categoryId: 'cat_learning', kind: 'habit', dayKey: '2026-09-26', xp: 10, tier: 1, text: 'Journal' }
+    ],
+    achievements: [
+      { id: 'a1', name: 'Fit {n}', kind: 'level', scope: { type: 'category', id: 'cat_fitness' }, threshold: 5 },
+      { id: 'a2', name: 'Chores', kind: 'count', metric: 'completions', scope: { type: 'category', id: 'cat_home' }, threshold: 10, autoTier: true },
+      { id: 'a3', name: 'Custom list level', kind: 'level', scope: { type: 'category', id: 'cat_custom' }, threshold: 3 }
+    ]
+  };
+}
+test('v1 → v2: skills seeded, items get a skill (keyword > parent > old list), lists and settings kept', () => {
+  const s = G.normalizeState(v1Data(), TK, '2026-10-01T12:00:00.000Z', { idGen });
+  assert.equal(s.migratedFrom, 1);
+  assert.equal(s.skills.length, 10);
+  assert.equal(s.categories.length, 5, 'existing lists are untouched');
+  assert.equal(s.settings.defaultCategoryId, 'cat_fitness');
+  assert.equal(s.settings.schemaVersion, 3); assert.equal(s.settings.aiSkillCheck, true); assert.equal(s.settings.onboarded, true);
+  const sk = Object.fromEntries(s.items.map(i => [i.id, [i.skillId, i.skillSource, i.aiCheckedAt]]));
+  assert.deepEqual(sk.i1, ['sk_strength', 'auto', null], 'keyword');
+  assert.deepEqual(sk.i2, ['sk_strength', 'auto', null], 'no keyword → old Fitness list → Strength');
+  assert.deepEqual(sk.i3, ['sk_strength', 'auto', null], 'sub-task with no keyword → parent');
+  assert.deepEqual(sk.i5, ['sk_clarity', 'auto', null], 'keyword beats the old list (Journal sat in Learning)');
+});
+test('v1 → v2: past completions are credited to skills', () => {
+  const s = G.normalizeState(v1Data(), TK, '2026-10-01T12:00:00.000Z', { idGen });
+  const c = Object.fromEntries(s.completions.map(x => [x.id, x.skillId]));
+  assert.deepEqual(c, { c1: 'sk_strength', c2: 'sk_learning', c3: 'sk_upkeep', c4: 'sk_clarity' });
+  const totals = G.xpTotals(s.completions);
+  assert.deepEqual(totals.bySkill, { sk_strength: 50, sk_learning: 25, sk_upkeep: 25, sk_clarity: 10 });
+});
+test('v1 → v2: list-level achievements retarget to skills; skill achievements added once', () => {
+  const s = G.normalizeState(v1Data(), TK, '2026-10-01T12:00:00.000Z', { idGen });
+  const by = Object.fromEntries(s.achievements.map(a => [a.name, a.scope]));
+  assert.deepEqual(by['Fit {n}'], { type: 'skill', id: 'sk_strength' });
+  assert.deepEqual(by['Chores'], { type: 'category', id: 'cat_home' }, 'count achievements keep their list scope');
+  assert.deepEqual(by['Custom list level'], { type: 'all' });
+  assert.equal(s.achievements.filter(a => a.seedKey === 'specialist').length, 1);
+  const again = G.normalizeState(JSON.parse(JSON.stringify(Object.assign({}, s, { settings: s.settings }))), TK, 'x', { idGen });
+  assert.equal(again.migratedFrom, null, 'v2 data is not upgraded twice');
+  assert.equal(again.achievements.filter(a => a.seedKey === 'specialist').length, 1);
+  assert.equal(again.skills.length, 10);
+});
+test('v2 load clears skill references to deleted skills', () => {
+  const s = G.normalizeState({ settings: { schemaVersion: 2 }, categories: lists, skills: skills.filter(x => x.id !== 'sk_clarity'), items: [task('t', { skillId: 'sk_clarity', skillSource: 'ai' })], completions: [], achievements: [] }, TK, 'x');
+  assert.deepEqual([s.items[0].skillId, s.items[0].skillSource], [null, null]);
+});
+test('normalizeState repairs orphans, bad colors and a missing default list', () => {
+  const s = G.normalizeState({ settings: { defaultCategoryId: 'gone', schemaVersion: 2 }, categories: [{ id: 'c1', name: 'One', color: 'neon' }], skills: [{ id: 's1', name: 'S', color: 'neon' }], items: [{ id: 'i1', text: 'a', parentId: 'nope' }], completions: [{ id: 'x', itemId: 'i1', dayKey: 'bad' }, { id: 'y', itemId: 'i1', dayKey: '2026-01-02', tier: 3 }], achievements: [{ id: 'a1', kind: 'bogus', threshold: 0 }] }, TK);
+  assert.equal(s.items[0].parentId, null); assert.equal(s.categories[0].color, 'blue'); assert.equal(s.skills[0].color, 'blue'); assert.equal(s.settings.defaultCategoryId, 'c1');
+  assert.equal(s.completions.length, 1); assert.equal(s.completions[0].xp, 50);
+  assert.equal(s.achievements[0].kind, 'manual'); assert.equal(s.achievements[0].threshold, 1);
+});
+test('buildBackup + validateBackup round-trip (v3); secrets never leak', () => {
+  const st = mkState([task('t', { skillId: 'sk_upkeep', skillSource: 'user' })], [comp('t', '2026-09-01', { kind: 'task', skillId: 'sk_upkeep' })], { achievements: G.seedAchievements('x', idGen) });
+  st.settings = Object.assign({}, st.settings, { apiKey: 'sk-should-not-export' });
+  const b = G.buildBackup(st, '1.1.0', '2026-09-23T00:00:00.000Z');
+  assert.equal(b.app, 'habit-tracker'); assert.equal(b.schemaVersion, 3); assert.equal(b.settings.apiKey, undefined); assert.equal(b.skills.length, 10);
+  const v = G.validateBackup(JSON.parse(JSON.stringify(b)), TK);
+  assert.ok(v.ok); assert.equal(v.fromVersion, 3); assert.equal(v.data.migratedFrom, null);
+  assert.equal(v.data.items[0].skillSource, 'user'); assert.equal(v.data.completions[0].skillId, 'sk_upkeep'); assert.equal(v.data.achievements.length, 9);
+});
+test('a v1 backup imports and upgrades', () => {
+  const v = G.validateBackup(Object.assign({ app: 'habit-tracker', schemaVersion: 1 }, v1Data()), TK, 'now');
+  assert.ok(v.ok); assert.equal(v.fromVersion, 1); assert.equal(v.data.skills.length, 10); assert.equal(v.data.completions.find(c => c.id === 'c4').skillId, 'sk_clarity');
+});
+test('validateBackup rejects foreign or newer files', () => {
+  assert.equal(G.validateBackup({ app: 'other' }).ok, false);
+  assert.equal(G.validateBackup({ app: 'habit-tracker', schemaVersion: 99, categories: [], items: [] }).ok, false);
+  assert.equal(G.validateBackup({ app: 'habit-tracker', schemaVersion: 3 }).ok, false);
+  assert.equal(G.validateBackup(null).ok, false);
+});
+
+// ---------- v1.2: weeks, day lists, late check-offs, reviews, pages ----------
+group('Weeks and day lists');
+test('weeks run Monday → Sunday', () => {
+  assert.equal(G.weekStartKey('2026-10-03'), '2026-09-28', 'Saturday → that Monday');
+  assert.equal(G.weekStartKey('2026-10-04'), '2026-09-28', 'Sunday closes the week');
+  assert.equal(G.weekStartKey('2026-10-05'), '2026-10-05', 'Monday starts a new one');
+  assert.deepEqual(G.weekDates('2026-10-01'), ['2026-09-28', '2026-09-29', '2026-09-30', '2026-10-01', '2026-10-02', '2026-10-03', '2026-10-04']);
+  assert.equal(G.dateInWeek('2026-10-01', 0), '2026-10-04', 'Sunday is the last day of the week');
+  assert.equal(G.dateInWeek('2026-10-01', 1), '2026-09-28');
+  assert.equal(G.weekStartKey('2027-01-01'), '2026-12-28', 'weeks cross the new year');
+  assert.deepEqual(G.sortWeekdays([0, 6, 1, 3]), [1, 3, 6, 0]);
+});
+test('late check-offs: earlier days this week only; upcoming days locked', () => {
+  const tk = '2026-10-01'; // Thursday
+  assert.ok(G.canLogOn('2026-09-28', tk), 'Monday'); assert.ok(G.canLogOn(tk, tk), 'today');
+  assert.ok(!G.canLogOn('2026-09-27', tk), 'last Sunday is last week'); assert.ok(!G.canLogOn('2026-10-02', tk), 'tomorrow is locked');
+  assert.ok(!G.canLogOn('nope', tk));
+});
+test('detectListDays reads day names, abbreviations, combos and ranges', () => {
+  const d = G.detectListDays;
+  assert.deepEqual(d('Monday'), [1]); assert.deepEqual(d('Tues'), [2]); assert.deepEqual(d('📅 Thursday'), [4]); assert.deepEqual(d('WEDS.'), [3]);
+  assert.deepEqual(d('Sat + Sun'), [0, 6]); assert.deepEqual(d('Saturday & Sunday'), [0, 6]); assert.deepEqual(d('Sat/Sun'), [0, 6]); assert.deepEqual(d('Weekend'), [0, 6]);
+  assert.deepEqual(d('Mon-Fri'), [1, 2, 3, 4, 5]); assert.deepEqual(d('Mon – Wed'), [1, 2, 3]); assert.deepEqual(d('Fri to Mon'), [0, 1, 5, 6]); assert.deepEqual(d('Weekdays'), [1, 2, 3, 4, 5]);
+  assert.equal(d('Reminders'), null); assert.equal(d('Sunday dinner ideas'), null); assert.equal(d('To do'), null); assert.equal(d(''), null); assert.equal(d('Everyday'), null);
+});
+test('listDaysLabel and listCoversDay', () => {
+  assert.equal(G.listDaysLabel([1]), 'Monday'); assert.equal(G.listDaysLabel([0, 6]), 'Sat + Sun'); assert.equal(G.listDaysLabel([1, 2, 3, 4, 5]), 'Weekdays');
+  assert.equal(G.listDaysLabel([0, 3, 1]), 'Mon + Wed + Sun'); assert.equal(G.listDaysLabel(ALL), 'Every day'); assert.equal(G.listDaysLabel(null), 'Not a day list');
+  assert.ok(G.listCoversDay({ days: [0, 6] }, '2026-10-03')); assert.ok(!G.listCoversDay({ days: [1] }, '2026-10-03')); assert.ok(!G.listCoversDay({ days: null }, '2026-10-03'));
+});
+test('repeatLabel lists days Monday-first', () => {
+  assert.equal(G.repeatLabel({ kind: 'custom', days: [0, 1] }), 'Mon Sun');
+  assert.equal(G.repeatLabel({ kind: 'weekly', days: [5] }), 'Weekly · Fri');
+});
+test('day list presets match their own names', () => {
+  assert.deepEqual(G.dayListPreset('week6').map(l => [l.name, l.days]), [['Monday', [1]], ['Tuesday', [2]], ['Wednesday', [3]], ['Thursday', [4]], ['Friday', [5]], ['Sat + Sun', [0, 6]]]);
+  assert.equal(G.dayListPreset('week7').length, 7);
+  for (const l of G.dayListPreset('week7')) assert.deepEqual(G.detectListDays(l.name), l.days, l.name);
+});
+
+group('Habits in day lists');
+const dayLists = { mon: { id: 'L1', name: 'Monday', days: [1] }, fri: { id: 'L5', name: 'Friday', days: [5] }, wknd: { id: 'L6', name: 'Sat + Sun', days: [0, 6] }, plain: { id: 'L0', name: 'Reminders', days: null } };
+function weekItems() {
+  return [
+    habit('pray', ALL, { text: 'Prayer', sortOrder: 1, categoryId: null }),
+    habit('shake', [1, 5], { text: 'Protein shake', sortOrder: 2, categoryId: 'L1' }),
+    habit('lift', [5], { text: 'Lift', sortOrder: 3, categoryId: 'L0' }),
+    task('sub', { parentId: 'pray', type: 'habit', text: 'Rosary' }),
+    task('quiz', { categoryId: 'L1', text: 'Quiz' })
+  ];
+}
+test('a daily habit shows in every day list; schedules place the rest', () => {
+  const items = weekItems(), tk = '2026-10-01';
+  assert.deepEqual(G.dayListInstances(dayLists.mon, items, tk).map(x => [x.item.id, x.date]), [['pray', '2026-09-28'], ['shake', '2026-09-28']]);
+  assert.deepEqual(G.dayListInstances(dayLists.fri, items, tk).map(x => x.item.id), ['pray', 'shake', 'lift']);
+  assert.deepEqual(G.dayListInstances(dayLists.plain, items, tk), [], 'ordinary lists get no projections');
+});
+test('Sat + Sun shows each habit twice: Saturday, then Sunday', () => {
+  const inst = G.dayListInstances(dayLists.wknd, weekItems(), '2026-10-01');
+  assert.deepEqual(inst.map(x => [x.item.id, x.weekday, x.date]), [['pray', 6, '2026-10-03'], ['pray', 0, '2026-10-04']]);
+});
+test('dayState: past / today / future and whether it can be logged', () => {
+  const items = weekItems(), ib = G.byId(items), tk = '2026-10-01';
+  const idx = G.indexCompletions([comp('pray', '2026-09-28')]);
+  const p = G.dayState(ib.get('pray'), ib, idx, '2026-09-28', tk);
+  assert.deepEqual([p.done, p.when, p.canLog], [true, 'past', true]);
+  const f = G.dayState(ib.get('pray'), ib, idx, '2026-10-03', tk);
+  assert.deepEqual([f.done, f.when, f.canLog], [false, 'future', false]);
+  assert.equal(G.dayState(ib.get('pray'), ib, idx, tk, tk).when, 'today');
+});
+test('weekStrip: Monday → Sunday with schedule flags', () => {
+  const items = weekItems(), ib = G.byId(items);
+  const strip = G.weekStrip(ib.get('shake'), ib, G.indexCompletions([comp('shake', '2026-09-28')]), '2026-10-01');
+  assert.deepEqual(strip.map(c => c.weekday), [1, 2, 3, 4, 5, 6, 0]);
+  assert.deepEqual(strip.map(c => c.scheduled), [true, false, false, false, true, false, false]);
+  assert.deepEqual(strip.map(c => c.done), [true, false, false, false, false, false, false]);
+  assert.deepEqual(strip.map(c => c.canLog), [true, true, true, true, false, false, false]);
+});
+
+group('Late check-offs');
+test('checking Monday\'s row on Thursday counts for Monday', () => {
+  const st = mkState(weekItems());
+  const plan = G.planComplete(st, 'shake', D(2026, 10, 1, 9), { idGen, date: '2026-09-28' });
+  assert.equal(plan.completions.length, 1); assert.equal(plan.completions[0].dayKey, '2026-09-28'); assert.equal(plan.late, true); assert.equal(plan.dayKey, '2026-09-28');
+  assert.equal(plan.completions[0].at, D(2026, 10, 1, 9).toISOString(), 'stamped with when you logged it');
+  st.completions.push(...plan.completions);
+  assert.equal(G.planComplete(st, 'shake', D(2026, 10, 1, 9), { idGen, date: '2026-09-28' }).completions.length, 0, 'Monday is already done');
+  assert.equal(G.planComplete(st, 'shake', D(2026, 10, 1, 9), { idGen }).completions.length, 1, 'today is separate');
+});
+test('a late check-off repairs the streak', () => {
+  const st = mkState([habit('h', ALL)], [comp('h', '2026-09-27'), comp('h', '2026-09-29'), comp('h', '2026-09-30')]);
+  const tk = '2026-10-01';
+  assert.equal(G.streak(st.items[0], G.indexCompletions(st.completions), tk).current, 2, 'missing Monday breaks it');
+  st.completions.push(...G.planComplete(st, 'h', D(2026, 10, 1, 9), { idGen, date: '2026-09-28' }).completions);
+  assert.equal(G.streak(st.items[0], G.indexCompletions(st.completions), tk).current, 4);
+});
+test('upcoming days and last week are blocked', () => {
+  const st = mkState(weekItems());
+  const fut = G.planComplete(st, 'pray', D(2026, 10, 1, 9), { idGen, date: '2026-10-03' });
+  assert.deepEqual([fut.completions.length, fut.blocked], [0, 'future']);
+  const old = G.planComplete(st, 'pray', D(2026, 10, 1, 9), { idGen, date: '2026-09-27' });
+  assert.deepEqual([old.completions.length, old.blocked], [0, 'past']);
+});
+test('tasks ignore the date: done is done', () => {
+  const plan = G.planComplete(mkState(weekItems()), 'quiz', D(2026, 10, 1, 9), { idGen, date: '2026-09-28' });
+  assert.equal(plan.completions[0].dayKey, '2026-10-01'); assert.equal(plan.late, false); assert.equal(plan.blocked, null);
+});
+test('multi-target habits and sub-tasks count per date', () => {
+  const st = mkState([habit('w', ALL, { timesPerDay: 3 }), habit('p', ALL), task('s1', { parentId: 'p', type: 'habit' }), task('s2', { parentId: 'p', type: 'habit' })]);
+  const at = D(2026, 10, 1, 9), opt = { idGen, date: '2026-09-29' };
+  st.completions.push(...G.planComplete(st, 'w', at, opt).completions);
+  st.completions.push(...G.planComplete(st, 'w', at, opt).completions);
+  const ib = G.byId(st.items), idx = G.indexCompletions(st.completions);
+  assert.deepEqual(G.doneState(ib.get('w'), ib, idx, '2026-09-29'), { done: false, count: 2, target: 3 });
+  assert.equal(G.doneState(ib.get('w'), ib, idx, '2026-10-01').count, 0);
+  st.completions.push(...G.planComplete(st, 's1', at, opt).completions);
+  const last = G.planComplete(st, 's2', at, opt);
+  assert.ok(last.parentAutoCompleted, 'last sub-task completes the parent for that date');
+  assert.ok(last.completions.every(c => c.dayKey === '2026-09-29'));
+});
+test('undo on a date removes that day\'s latest check-in only', () => {
+  const st = mkState([habit('h', ALL, { timesPerDay: 2 })], [comp('h', '2026-09-29', { at: '2026-09-29T08:00:00.000Z' }), comp('h', '2026-09-29', { at: '2026-09-29T20:00:00.000Z' }), comp('h', '2026-10-01')]);
+  const plan = G.planUncomplete(st, 'h', D(2026, 10, 1, 9), { date: '2026-09-29' });
+  assert.equal(plan.removeCompletionIds.length, 1);
+  assert.equal(st.completions.find(c => c.id === plan.removeCompletionIds[0]).at, '2026-09-29T20:00:00.000Z');
+  assert.equal(G.planUncomplete(st, 'h', D(2026, 10, 1, 9), { date: '2026-10-02' }).blocked, 'future');
+});
+
+group('Duplicate habits');
+test('duplicateHabitGroups finds same-named habits, oldest first', () => {
+  const items = [habit('a', [1], { text: 'Prayer', createdAt: '2026-09-25' }), habit('b', [2], { text: 'prayer!', createdAt: '2026-09-24' }), habit('c', ALL, { text: 'Lift' }), task('d', { text: 'Prayer' })];
+  assert.deepEqual(G.duplicateHabitGroups(items).map(g => g.map(i => i.id)), [['b', 'a']]);
+});
+test('merging combines days, history, sub-tasks and achievements into one streak', () => {
+  const st = mkState([
+    habit('a', [1], { text: 'Prayer', createdAt: '1', skillId: 'sk_clarity', skillSource: 'auto' }),
+    habit('b', [2], { text: 'Prayer', createdAt: '2', skillId: null }),
+    habit('c', [3], { text: 'Prayer', createdAt: '3', skillId: 'sk_social', skillSource: 'user' }),
+    task('kid', { parentId: 'b', type: 'habit', text: 'Rosary' })
+  ], [comp('a', '2026-09-28'), comp('b', '2026-09-29'), comp('c', '2026-09-30')], { achievements: [{ id: 'x', kind: 'streak', scope: { type: 'item', id: 'c' }, threshold: 7 }] });
+  const m = G.planMergeHabits(st, ['a', 'b', 'c']);
+  assert.equal(m.keep.id, 'a'); assert.deepEqual(m.keep.repeat, { kind: 'custom', days: [1, 2, 3] });
+  assert.deepEqual([m.keep.skillId, m.keep.skillSource], ['sk_social', 'user'], 'your own pick wins');
+  assert.deepEqual(m.removeItemIds, ['b', 'c']);
+  assert.deepEqual(m.completions.map(c => c.itemId + ':' + c.skillId), ['a:sk_social', 'a:sk_social', 'a:sk_social']);
+  assert.deepEqual(m.children.map(c => c.parentId), ['a']); assert.equal(m.keep.timesPerDay, 1);
+  assert.deepEqual(m.achievements.map(a => a.scope), [{ type: 'item', id: 'a' }]);
+  const merged = st.completions.map(c => m.completions.find(x => x.id === c.id) || c);
+  assert.equal(G.streak(m.keep, G.indexCompletions(merged), '2026-09-30').current, 3);
+});
+test('a record id appearing twice never deletes the kept habit', () => {
+  const st = mkState([habit('a', ALL, { text: 'Prayer' }), habit('a', ALL, { text: 'Prayer' })]);
+  assert.equal(G.duplicateHabitGroups(st.items).length, 0, 'one id is one habit');
+  assert.equal(G.planMergeHabits(st, ['a', 'a']), null);
+  const s = G.normalizeState({ settings: { schemaVersion: 3 }, categories: lists, skills, items: st.items, completions: [comp('a', '2026-09-28', { id: 'c1' }), comp('a', '2026-09-28', { id: 'c1' })], achievements: [] }, TK, 'x');
+  assert.equal(s.items.length, 1); assert.equal(s.completions.length, 1, 'duplicate completion ids collapse');
+});
+test('merged sub-tasks follow the kept habit\'s list', () => {
+  const st = mkState([habit('a', [1], { text: 'Prayer', categoryId: 'L1' }), habit('b', [2], { text: 'Prayer', categoryId: 'L2' }), task('k', { parentId: 'b', type: 'habit', categoryId: 'L2' })]);
+  assert.equal(G.planMergeHabits(st, ['a', 'b']).children[0].categoryId, 'L1');
+});
+test('merging copies of a daily habit stays daily; needs two habits', () => {
+  const st = mkState([habit('a', ALL, { text: 'Prayer' }), habit('b', ALL, { text: 'Prayer', timesPerDay: 2 })]);
+  const m = G.planMergeHabits(st, ['a', 'b']);
+  assert.deepEqual(m.keep.repeat, { kind: 'daily', days: ALL }); assert.equal(m.keep.timesPerDay, 2);
+  assert.equal(G.planMergeHabits(st, ['a']), null);
+});
+
+group('Prayer and suggested habits');
+test('prayer and devotional habits boost Clarity', () => {
+  for (const t of ['Pray', 'Prayer', 'Morning prayer', 'Pray for mom', 'Read bible', 'Bible study', 'Devotional', 'Church']) assert.equal(skillOf(t), 'sk_clarity', t);
+});
+test('every suggested habit infers the skill it is listed under', () => {
+  const groups = G.habitSuggestions(skills);
+  assert.equal(groups.length, 10);
+  for (const g of groups) for (const it of g.items) assert.equal(skillOf(it.text), g.skillId, it.text);
+  assert.equal(groups.find(g => g.skillId === 'sk_vitality').items.find(i => i.text === 'Drink water').timesPerDay, 8);
+  assert.equal(G.habitSuggestions(skills.filter(s => s.id !== 'sk_wealth')).length, 9, 'deleted skills drop out');
+});
+test('^weekly inside a day list repeats on that list\'s day', () => {
+  assert.deepEqual(G.parseQuickEntry('Lift ^weekly', [], TK, skills, { weeklyDay: 5 }).repeat, { kind: 'weekly', days: [5] });
+  assert.deepEqual(G.parseQuickEntry('Lift ^weekly', [], TK, skills).repeat, { kind: 'weekly', days: [3] }, 'default: today (Wednesday)');
+});
+
+group('Pages');
+test('all pages on by default; Lists and Skills can\'t be turned off', () => {
+  assert.deepEqual(G.enabledPages(G.defaultSettings()), ['planner', 'lists', 'habits', 'skills', 'review']);
+  assert.deepEqual(G.enabledPages({ pages: { planner: false, habits: false, review: false, lists: false, skills: false } }), ['lists', 'skills']);
+  assert.equal(G.startPage({ pages: { planner: false } }), 'lists'); assert.equal(G.startPage({}), 'planner');
+  assert.deepEqual(G.normalizePages({ planner: 'no', habits: false }), { planner: true, habits: false, review: true });
+});
+
+group('Reviews');
+function reviewState() {
+  const items = [habit('pray', ALL, { text: 'Prayer', skillId: 'sk_clarity' }), habit('lift', [1, 3, 5], { text: 'Lift', skillId: 'sk_strength' })];
+  const c = (id, day) => comp(id, day, { skillId: id === 'pray' ? 'sk_clarity' : 'sk_strength', xp: id === 'pray' ? 10 : 50 });
+  const completions = [
+    c('pray', '2025-12-30'),
+    c('pray', '2026-09-28'), c('pray', '2026-09-29'), c('pray', '2026-09-30'), c('pray', '2026-10-01'),
+    c('lift', '2026-09-28'), c('lift', '2026-09-30'),
+    comp('gone', '2026-10-01', { kind: 'task', xp: 25, text: 'Renew passport', skillId: 'sk_upkeep' })
+  ];
+  return mkState(items, completions, { achievements: [
+    { id: 'a', name: 'Getting Started · {n} items done', icon: '✅', kind: 'count', threshold: 10, unlockedAt: '2026-10-01T12:00:00.000Z' },
+    { id: 'b', name: 'Old', kind: 'manual', threshold: 1, unlockedAt: '2025-05-01T00:00:00.000Z' }] });
+}
+test('yearStats counts the year from the completions log', () => {
+  const s = G.yearStats(reviewState(), 2026, '2026-10-02');
+  assert.equal(s.checkins, 7); assert.equal(s.habits, 6); assert.equal(s.tasks, 1); assert.equal(s.activeDays, 4);
+  assert.equal(s.xp, 4 * 10 + 2 * 50 + 25); assert.equal(s.byMonth[8], 5); assert.equal(s.byMonth[9], 2);
+  assert.deepEqual(s.topHabits.map(h => [h.text, h.count]), [['Prayer', 4], ['Lift', 2]]);
+  assert.deepEqual(s.streaks.map(x => [x.text, x.best]), [['Prayer', 4], ['Lift', 2]]);
+  assert.deepEqual(s.bestMonth, { month: 8, count: 5 }); assert.equal(s.quietMonth, null, 'October is still in progress');
+  assert.deepEqual(G.yearStats(reviewState(), 2026, '2027-01-05').quietMonth, { month: 10, count: 0 }, 'a finished year: November had none');
+  assert.equal(s.firstDay, '2026-09-28'); assert.equal(s.lastMonth, 9);
+  assert.deepEqual(s.skills.map(x => [x.skillId, x.xp]), [['sk_strength', 100], ['sk_clarity', 40], ['sk_upkeep', 25]]);
+  assert.deepEqual(s.achievements.map(a => a.name), ['Getting Started · 10 items done']);
+  assert.equal(s.levelStart, 1); assert.equal(s.levelEnd, 2, '10 XP before + 165 this year crosses 100');
+  assert.equal(G.yearStats(reviewState(), 2024, '2026-10-02').checkins, 0);
+});
+test('Annual Review markdown: numbers + the three questions', () => {
+  const s = G.yearStats(reviewState(), 2026, '2026-10-02');
+  const md = G.reviewMarkdown('annual', 2026, s, { answers: { wentWell: 'Prayed most days.', notWell: '', workingToward: 'Security+' } }, [], skills);
+  assert.ok(md.startsWith('# 2026 Annual Review\n'));
+  assert.ok(md.includes('**7 check-ins**')); assert.ok(md.includes('Top habits: Prayer (4), Lift (2)'));
+  assert.ok(md.includes('## What went well this year?\n\nPrayed most days.'));
+  assert.ok(md.includes('## What didn’t go so well this year?\n\n_(not written yet)_'));
+  assert.ok(md.includes('Check-ins by month: Sep 5 · Oct 2'), md);
+});
+test('Integrity Report markdown: values with questions, notes and evidence', () => {
+  const s = G.yearStats(reviewState(), 2026, '2026-10-02');
+  const values = [{ id: 'v1', name: 'Faith', questions: 'Am I making time for prayer?', skillIds: ['sk_clarity'] }];
+  const md = G.reviewMarkdown('integrity', 2026, s, { answers: { living: '', higher: 'Pray before work.', values: { v1: 'Daily prayer since September.' } } }, values, skills);
+  assert.ok(md.startsWith('# 2026 Integrity Report\n'));
+  assert.ok(md.includes('- **Faith** — Am I making time for prayer?'));
+  assert.ok(md.includes('### Faith\n\n*Am I making time for prayer?*\n\nEvidence this year: 🧘 Clarity +40 XP\n\nDaily prayer since September.'), md);
+  assert.ok(md.includes('## How can I set a higher standard in the future?\n\nPray before work.'));
+});
+test('reviewDue: Annual in December/January, Integrity in June/July, until done or dismissed', () => {
+  assert.deepEqual(G.reviewDue('2026-12-05', [], {}), { kind: 'annual', year: 2026, id: 'annual-2026' });
+  assert.deepEqual(G.reviewDue('2027-01-10', [], {}), { kind: 'annual', year: 2026, id: 'annual-2026' });
+  assert.deepEqual(G.reviewDue('2026-06-15', [], {}), { kind: 'integrity', year: 2026, id: 'integrity-2026' });
+  assert.equal(G.reviewDue('2026-10-03', [], {}), null);
+  assert.equal(G.reviewDue('2026-12-05', [{ id: 'annual-2026', completedAt: 'x' }], {}), null);
+  assert.equal(G.reviewDue('2026-12-05', [], { 'annual-2026': true }), null);
+});
+test('normalizeReview keeps known answer fields; reviewYears lists data years', () => {
+  const r = G.normalizeReview({ kind: 'annual', year: '2026', answers: { wentWell: 'a', bogus: 'x', notWell: 5 } });
+  assert.deepEqual(r, { id: 'annual-2026', kind: 'annual', year: 2026, answers: { wentWell: 'a', notWell: '', workingToward: '' }, completedAt: null, updatedAt: null });
+  assert.deepEqual(G.normalizeReview({ kind: 'integrity', year: 2026, answers: { values: { v1: 'x', v2: 3 } } }).answers, { living: '', higher: '', values: { v1: 'x' } });
+  assert.deepEqual(G.reviewYears(reviewState().completions, '2026-10-02'), [2026, 2025]);
+  assert.deepEqual(G.reviewYears([], '2027-06-10', [{ year: 2026 }]), [2027, 2026], 'a saved review keeps its year reachable');
+});
+
+group('Migration v2 → v3');
+function v2Data() {
+  return {
+    settings: { id: 'settings', dayStartHour: 4, defaultCategoryId: 'list_reminders', model: 'claude-sonnet-5', aiSkillCheck: true, schemaVersion: 2, onboarded: true },
+    categories: [{ id: 'list_reminders', name: 'Reminders', color: 'blue', icon: '📋', sortOrder: 0 }, { id: 'm', name: 'Monday', color: 'red', icon: '📋', sortOrder: 1 }, { id: 'w', name: 'Sat + Sun', color: 'green', icon: '📋', sortOrder: 2 }],
+    skills: skills.map(s => s.id === 'sk_clarity' ? Object.assign({}, s, { hint: 'journaling, meditation, reflection, gratitude, planning, screen-time limits' }) : s),
+    items: [habit('pray', ALL, { text: 'Prayer', categoryId: 'm' }), task('quiz', { categoryId: 'm', text: 'Quiz', skillId: 'sk_learning', skillSource: 'auto' })],
+    completions: [comp('pray', '2026-09-28')],
+    achievements: G.seedAchievements('x', idGen)
+  };
+}
+test('v2 → v3: day lists detected from names, pages on, values empty', () => {
+  const s = G.normalizeState(v2Data(), '2026-10-03', 'now', { idGen });
+  assert.equal(s.migratedFrom, 2);
+  assert.deepEqual(s.categories.map(c => [c.name, c.days, c.showOnPlanner]), [['Reminders', null, true], ['Monday', [1], true], ['Sat + Sun', [0, 6], true]]);
+  assert.deepEqual(s.settings.pages, { planner: true, habits: true, review: true }); assert.deepEqual(s.settings.coreValues, []); assert.deepEqual(s.reviews, []);
+  assert.equal(s.settings.schemaVersion, 3); assert.equal(s.items.length, 2); assert.equal(s.completions.length, 1);
+});
+test('v2 → v3: Clarity\'s hint gains prayer unless you edited it', () => {
+  assert.ok(G.normalizeState(v2Data(), TK, 'now').skills.find(x => x.id === 'sk_clarity').hint.includes('prayer'));
+  const d = v2Data(); d.skills = d.skills.map(x => x.id === 'sk_clarity' ? Object.assign({}, x, { hint: 'my own words' }) : x);
+  assert.equal(G.normalizeState(d, TK, 'now').skills.find(x => x.id === 'sk_clarity').hint, 'my own words');
+});
+test('v3 keeps your day settings (no re-detection) and round-trips reviews and values', () => {
+  const s = G.normalizeState(v2Data(), TK, 'now', { idGen });
+  s.categories[1].days = null; s.categories[0].days = [2]; s.categories[2].showOnPlanner = false;
+  s.settings.pages.review = false;
+  s.settings.coreValues = [{ id: 'v1', name: 'Faith', questions: 'q', skillIds: ['sk_clarity', 'sk_gone'] }];
+  s.reviews = [G.normalizeReview({ kind: 'annual', year: 2026, answers: { wentWell: 'yes' } })];
+  const v = G.validateBackup(JSON.parse(JSON.stringify(G.buildBackup(s, '1.2.0', 'now'))), TK, 'now');
+  assert.ok(v.ok); assert.equal(v.fromVersion, 3); assert.equal(v.data.migratedFrom, null);
+  assert.deepEqual(v.data.categories.map(c => [c.days, c.showOnPlanner]), [[[2], true], [null, true], [[0, 6], false]]);
+  assert.equal(v.data.settings.pages.review, false);
+  assert.deepEqual(v.data.settings.coreValues, [{ id: 'v1', name: 'Faith', questions: 'q', skillIds: ['sk_clarity'] }], 'links to deleted skills drop');
+  assert.equal(v.data.reviews[0].answers.wentWell, 'yes');
+});
+test('v1 → v3 in one pass', () => {
+  const s = G.normalizeState(v1Data(), TK, 'now', { idGen });
+  assert.equal(s.migratedFrom, 1); assert.equal(s.skills.length, 10); assert.ok(s.categories.every(c => c.days === null && c.showOnPlanner));
+  assert.deepEqual(s.settings.pages, { planner: true, habits: true, review: true });
+});
+
+run();
+</script>
+</body>
+</html>
