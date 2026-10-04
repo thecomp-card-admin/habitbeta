@@ -143,7 +143,7 @@ var Game = (function () {
       const raw = Array.isArray(repeat.days) && repeat.days.length ? Number(repeat.days[0]) : (todayKey ? weekdayOf(todayKey) : 1);
       days = [((Math.round(raw) % 7) + 7) % 7];
     } else {
-      days = [...new Set((repeat.days || []).map(Number).filter(d => Number.isInteger(d) && d >= 0 && d <= 6))].sort((a, b) => a - b);
+      days = [...new Set((Array.isArray(repeat.days) ? repeat.days : []).map(Number).filter(d => Number.isInteger(d) && d >= 0 && d <= 6))].sort((a, b) => a - b);
       if (!days.length) days = ALL_DAYS.slice();
     }
     return { kind, days };
@@ -664,7 +664,7 @@ var Game = (function () {
   function normalizeCoreValue(v, skillIds) {
     const ids = Array.isArray(v.skillIds) ? v.skillIds.map(String) : [];
     return {
-      id: String(v.id || newId()), name: String(v.name || 'Value').slice(0, 60), questions: String(v.questions || ''),
+      id: String(v.id || newId()), name: Array.from(String(v.name || 'Value')).slice(0, 60).join(''), questions: String(v.questions || ''),
       skillIds: [...new Set(skillIds ? ids.filter(id => skillIds.has(id)) : ids)]
     };
   }
@@ -878,8 +878,11 @@ var Game = (function () {
       a.unlockedAt = nowIso;
       unlocked.push(a);
       if (a.autoTier && (a.kind === 'count' || a.kind === 'streak')) {
+        const tier = (a.tier || 1) + 1;
+        // The next tier's id comes from its series, so two devices that reach it before syncing make the same record.
+        if (working.some(w => w.seriesId === a.seriesId && (w.tier || 1) === tier)) continue;
         const next = Object.assign({}, a, {
-          id: idGen(), threshold: nextThreshold(a.threshold), unlockedAt: null, createdAt: nowIso, tier: (a.tier || 1) + 1
+          id: opts && opts.idGen ? idGen() : `${a.seriesId}-t${tier}`, threshold: nextThreshold(a.threshold), unlockedAt: null, createdAt: nowIso, tier
         });
         delete next.seedKey;
         working.push(next);
@@ -1301,48 +1304,59 @@ var Game = (function () {
     }
     if (typeof state.settings.aiSkillCheck !== 'boolean') state.settings.aiSkillCheck = true;
   }
+  // One record of each kind, cleaned up the same way whether it comes from storage, a backup or another device.
+  function normalizeCategory(c, i, fromVersion) {
+    return {
+      id: String(c.id || newId()), name: String(c.name || 'Untitled'), color: COLORS.includes(c.color) ? c.color : 'blue',
+      icon: String(c.icon || '📋'),
+      // v3: day lists. Older data gets its days from the list name ("Monday", "Sat + Sun").
+      days: (fromVersion || SCHEMA_VERSION) < 3 && c.days === undefined ? detectListDays(c.name) : normalizeDays(c.days),
+      showOnPlanner: c.showOnPlanner !== false,
+      sortOrder: Number.isFinite(Number(c.sortOrder)) ? Number(c.sortOrder) : (i || 0), createdAt: c.createdAt || null
+    };
+  }
+  function normalizeSkill(s, i) {
+    return {
+      id: String(s.id || newId()), name: String(s.name || 'Skill'), icon: String(s.icon || '⭐'),
+      color: COLORS.includes(s.color) ? s.color : 'blue', hint: String(s.hint || ''),
+      sortOrder: Number.isFinite(Number(s.sortOrder)) ? Number(s.sortOrder) : (i || 0), createdAt: s.createdAt || null
+    };
+  }
+  function normalizeCompletion(c) {
+    return {
+      id: String(c.id || newId()), itemId: String(c.itemId), categoryId: c.categoryId ? String(c.categoryId) : null,
+      skillId: c.skillId ? String(c.skillId) : null,
+      kind: ['task', 'habit', 'subtask'].includes(c.kind) ? c.kind : 'task', dayKey: c.dayKey, at: c.at || null,
+      tier: clampTier(c.tier), xp: Number.isFinite(Number(c.xp)) ? Number(c.xp) : xpForTier(c.tier), text: String(c.text || '')
+    };
+  }
+  function normalizeAchievement(a) {
+    const out = {
+      id: String(a.id || newId()), name: String(a.name || 'Achievement'), icon: String(a.icon || '🏆'),
+      kind: ['count', 'streak', 'level', 'manual'].includes(a.kind) ? a.kind : 'manual',
+      metric: ['completions', 'tasks', 'habits', 'subtasks'].includes(a.metric) ? a.metric : (a.kind === 'count' ? 'completions' : undefined),
+      scope: a.scope && SCOPE_TYPES.includes(a.scope.type) ? { type: a.scope.type, id: a.scope.id ? String(a.scope.id) : undefined } : { type: 'all' },
+      threshold: Math.max(1, Math.floor(Number(a.threshold) || 1)), autoTier: !!a.autoTier,
+      seriesId: String(a.seriesId || a.id || newId()), tier: Math.max(1, Math.floor(Number(a.tier) || 1)),
+      unlockedAt: a.unlockedAt || null, createdAt: a.createdAt || null
+    };
+    if (a.seedKey) out.seedKey = String(a.seedKey);
+    return out;
+  }
   function normalizeState(data, todayKey, nowIso, opts) {
     const d = data || {};
     const fromVersion = stateVersion(d);
     const idGen = (opts && opts.idGen) || newId;
     const settings = Object.assign(defaultSettings(null), d.settings || {}, { id: 'settings' });
-    const categories = (Array.isArray(d.categories) ? d.categories : []).filter(c => c && typeof c === 'object').map((c, i) => ({
-      id: String(c.id || newId()), name: String(c.name || 'Untitled'), color: COLORS.includes(c.color) ? c.color : 'blue',
-      icon: String(c.icon || '📋'),
-      // v3: day lists. Older data gets its days from the list name ("Monday", "Sat + Sun").
-      days: fromVersion < 3 && c.days === undefined ? detectListDays(c.name) : normalizeDays(c.days),
-      showOnPlanner: c.showOnPlanner !== false,
-      sortOrder: Number.isFinite(Number(c.sortOrder)) ? Number(c.sortOrder) : i, createdAt: c.createdAt || null
-    }));
-    const skills = (Array.isArray(d.skills) ? d.skills : []).filter(s => s && typeof s === 'object').map((s, i) => ({
-      id: String(s.id || newId()), name: String(s.name || 'Skill'), icon: String(s.icon || '⭐'),
-      color: COLORS.includes(s.color) ? s.color : 'blue', hint: String(s.hint || ''),
-      sortOrder: Number.isFinite(Number(s.sortOrder)) ? Number(s.sortOrder) : i, createdAt: s.createdAt || null
-    }));
+    const categories = (Array.isArray(d.categories) ? d.categories : []).filter(c => c && typeof c === 'object').map((c, i) => normalizeCategory(c, i, fromVersion));
+    const skills = (Array.isArray(d.skills) ? d.skills : []).filter(s => s && typeof s === 'object').map((s, i) => normalizeSkill(s, i));
     // Records with the same id (only possible in a hand-edited backup) keep the first copy.
     const uniqueById = arr => { const seen = new Set(); return arr.filter(x => (seen.has(x.id) ? false : (seen.add(x.id), true))); };
     const items = uniqueById((Array.isArray(d.items) ? d.items : []).filter(x => x && typeof x === 'object').map(x => normalizeItem(x, todayKey)));
     const itemIds = new Set(items.map(i => i.id));
     for (const it of items) if (it.parentId && !itemIds.has(it.parentId)) it.parentId = null;
-    const completions = (Array.isArray(d.completions) ? d.completions : []).filter(c => c && c.itemId && isDayKey(c.dayKey)).map(c => ({
-      id: String(c.id || newId()), itemId: String(c.itemId), categoryId: c.categoryId ? String(c.categoryId) : null,
-      skillId: c.skillId ? String(c.skillId) : null,
-      kind: ['task', 'habit', 'subtask'].includes(c.kind) ? c.kind : 'task', dayKey: c.dayKey, at: c.at || null,
-      tier: clampTier(c.tier), xp: Number.isFinite(Number(c.xp)) ? Number(c.xp) : xpForTier(c.tier), text: String(c.text || '')
-    }));
-    const achievements = (Array.isArray(d.achievements) ? d.achievements : []).filter(a => a && typeof a === 'object').map(a => {
-      const out = {
-        id: String(a.id || newId()), name: String(a.name || 'Achievement'), icon: String(a.icon || '🏆'),
-        kind: ['count', 'streak', 'level', 'manual'].includes(a.kind) ? a.kind : 'manual',
-        metric: ['completions', 'tasks', 'habits', 'subtasks'].includes(a.metric) ? a.metric : (a.kind === 'count' ? 'completions' : undefined),
-        scope: a.scope && SCOPE_TYPES.includes(a.scope.type) ? { type: a.scope.type, id: a.scope.id ? String(a.scope.id) : undefined } : { type: 'all' },
-        threshold: Math.max(1, Math.floor(Number(a.threshold) || 1)), autoTier: !!a.autoTier,
-        seriesId: String(a.seriesId || a.id || newId()), tier: Math.max(1, Math.floor(Number(a.tier) || 1)),
-        unlockedAt: a.unlockedAt || null, createdAt: a.createdAt || null
-      };
-      if (a.seedKey) out.seedKey = String(a.seedKey);
-      return out;
-    });
+    const completions = (Array.isArray(d.completions) ? d.completions : []).filter(c => c && c.itemId && isDayKey(c.dayKey)).map(normalizeCompletion);
+    const achievements = (Array.isArray(d.achievements) ? d.achievements : []).filter(a => a && typeof a === 'object').map(normalizeAchievement);
     const reviewMap = new Map();
     for (const r of Array.isArray(d.reviews) ? d.reviews : []) {
       if (!r || typeof r !== 'object') continue;
@@ -1391,6 +1405,155 @@ var Game = (function () {
     return { ok: true, data, fromVersion: v };
   }
 
+
+  // ---------- sync (accounts + a cloud copy, app 1.3) ----------
+  // Every list, item, check-in, skill, achievement and review syncs as its own record. Settings sync as one record
+  // that holds only the shared preferences: never the API key, and not device-only fields (backup date, first launch).
+  // Conflicts: the newest edit wins (ms timestamps); exact ties go to the higher device id. The server uses the same rule.
+  const SYNC_STORES = Object.freeze(['categories', 'items', 'completions', 'achievements', 'skills', 'reviews', 'settings']);
+  const SYNCED_SETTINGS = Object.freeze(['dayStartHour', 'defaultCategoryId', 'model', 'aiSkillCheck', 'pages', 'coreValues', 'reviewDismissed', 'plannerSetupDismissed']);
+  function syncKey(store, id) { return store + ':' + id; }
+  function splitSyncKey(k) {
+    const s = String(k), i = s.indexOf(':');
+    return i <= 0 ? null : { store: s.slice(0, i), id: s.slice(i + 1) };
+  }
+  function syncedSettings(settings) {
+    const out = {};
+    for (const k of SYNCED_SETTINGS) if (settings && settings[k] !== undefined) out[k] = JSON.parse(JSON.stringify(settings[k]));
+    return out;
+  }
+  // Settings from another device: keep only known, well-formed fields (skill links in values are kept as-is,
+  // since the skill may arrive later in the same sync).
+  function normalizeSyncedSettings(raw) {
+    const r = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+    const out = {};
+    if (Number.isInteger(r.dayStartHour) && r.dayStartHour >= 0 && r.dayStartHour <= 23) out.dayStartHour = r.dayStartHour;
+    if (typeof r.defaultCategoryId === 'string' || r.defaultCategoryId === null) out.defaultCategoryId = r.defaultCategoryId;
+    if (typeof r.model === 'string' && r.model.trim()) out.model = r.model.trim();
+    if (typeof r.aiSkillCheck === 'boolean') out.aiSkillCheck = r.aiSkillCheck;
+    if (r.pages && typeof r.pages === 'object') out.pages = normalizePages(r.pages);
+    if (Array.isArray(r.coreValues)) out.coreValues = r.coreValues.filter(v => v && typeof v === 'object' && String(v.name || '').trim()).map(v => normalizeCoreValue(v, null));
+    if (r.reviewDismissed && typeof r.reviewDismissed === 'object' && !Array.isArray(r.reviewDismissed)) out.reviewDismissed = Object.fromEntries(Object.entries(r.reviewDismissed).filter(([, v]) => v === true));
+    if (typeof r.plannerSetupDismissed === 'boolean') out.plannerSetupDismissed = r.plannerSetupDismissed;
+    return out;
+  }
+  // A record from another device, cleaned up for this one. The row's id always wins. → record | null (unusable)
+  function normalizeRecord(store, data, id, todayKey) {
+    if (!data || typeof data !== 'object' || Array.isArray(data) || id === undefined || id === null || id === '') return null;
+    const d = Object.assign({}, data, { id: String(id) });
+    switch (store) {
+      case 'items': return normalizeItem(d, todayKey);
+      case 'categories': return normalizeCategory(d, 0, SCHEMA_VERSION);
+      case 'skills': return normalizeSkill(d, 0);
+      case 'completions': return d.itemId && isDayKey(d.dayKey) ? normalizeCompletion(d) : null;
+      case 'achievements': return normalizeAchievement(d);
+      case 'reviews': { const r = normalizeReview(d, todayKey ? +String(todayKey).slice(0, 4) : null); return r.id === d.id ? r : null; }
+      default: return null;
+    }
+  }
+  // Edit time for a record: now, but always after the version this device last saw (so a local edit beats it
+  // even if this clock runs behind).
+  function syncStamp(prevU, nowMs) { return Math.max(Math.floor(Number(nowMs) || 0), (Number(prevU) || 0) + 1); }
+  // Does version a ({u, v}) beat version b? u = edit time (ms), v = device id.
+  function syncNewer(a, b) {
+    if (!a) return false;
+    if (!b) return true;
+    const au = Number(a.u) || 0, bu = Number(b.u) || 0;
+    if (au !== bu) return au > bu;
+    return String(a.v || '') > String(b.v || '');
+  }
+  function decodeJwt(token) {
+    const parts = String(token || '').split('.');
+    if (parts.length !== 3) return null;
+    try {
+      let b = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+      while (b.length % 4) b += '=';
+      const bin = atob(b);
+      const bytes = Uint8Array.from(bin, ch => ch.charCodeAt(0));
+      return JSON.parse(new TextDecoder().decode(bytes));
+    } catch (e) { return null; }
+  }
+  // config.js → { url, key } when sync is set up, null when it isn't, { error } when it's set up wrong.
+  // The publishable key is safe in a public repo (it only reaches what Row Level Security allows); a secret key is not.
+  function syncConfig(raw) {
+    if (!raw || typeof raw !== 'object') return null;
+    const url = String(raw.supabaseUrl || '').trim().replace(/\/+$/, '');
+    const key = String(raw.supabasePublishableKey || '').trim();
+    if (!url && !key) return null;
+    if (/^sb_secret_/i.test(key) || (decodeJwt(key) || {}).role === 'service_role') {
+      return { error: 'config.js holds a secret key. Use the publishable key (sb_publishable_…) and rotate the secret key in Supabase.' };
+    }
+    if (!/^https:\/\/[^\s/?#]+$/i.test(url) && !/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(url)) {
+      return { error: 'The Supabase URL in config.js should look like https://abcd1234.supabase.co' };
+    }
+    if (!key) return { error: 'config.js is missing the publishable key (sb_publishable_…).' };
+    return { url, key };
+  }
+  // Anything you made yourself (beyond the starter list, skills and achievements)?
+  function hasUserData(state) {
+    const s = state || {};
+    const seedLists = new Set(SEED_LISTS.map(c => c.id)), seedSkills = new Set(SEED_SKILLS.map(x => x.id));
+    const seedSeries = new Set((s.achievements || []).filter(a => a.seedKey).map(a => a.seriesId));
+    return (s.items || []).length > 0 || (s.completions || []).length > 0 || (s.reviews || []).length > 0
+      || (s.categories || []).some(c => !seedLists.has(c.id)) || (s.skills || []).some(x => !seedSkills.has(x.id))
+      || (s.achievements || []).some(a => !a.seedKey && !seedSeries.has(a.seriesId))
+      || ((s.settings && s.settings.coreValues) || []).length > 0;
+  }
+  // First sign-in on a device: empty account → upload this device; empty device → download the account;
+  // both have data → ask.
+  function firstSyncPlan(cloudHasData, localHasData) { return cloudHasData ? (localHasData ? 'choose' : 'download') : 'upload'; }
+  // "Merge" on first sign-in: the account's copy wins for anything both have; this device's other records are added.
+  // Starter achievements the account already has (same seedKey, different id) are dropped instead of doubled.
+  // A review written more recently on this device than the account's copy (by updatedAt) is kept and uploaded.
+  function mergePlan(state, cloudKeys, cloudSeedKeys, cloudReviewTimes) {
+    const upload = [], drop = [], keepLocal = [];
+    const ach = (state && state.achievements) || [];
+    const droppedSeries = new Set(ach.filter(a => a.seedKey && cloudSeedKeys.has(a.seedKey) && !cloudKeys.has(syncKey('achievements', a.id))).map(a => a.seriesId));
+    for (const store of SYNC_STORES) {
+      if (store === 'settings') continue;
+      for (const r of (state && state[store]) || []) {
+        const k = syncKey(store, r.id);
+        if (cloudKeys.has(k)) {
+          if (store === 'reviews' && cloudReviewTimes && cloudReviewTimes.has(r.id) && String(r.updatedAt || '') > String(cloudReviewTimes.get(r.id) || '')) keepLocal.push(k);
+          continue;
+        }
+        if (store === 'achievements' && droppedSeries.has(r.seriesId)) { drop.push({ store, id: r.id }); continue; }
+        upload.push(k);
+      }
+    }
+    return { upload, drop, keepLocal };
+  }
+  // Core values after a merge: the account's list, plus this device's values it doesn't have (by id or name).
+  function mergeCoreValues(cloudValues, localValues) {
+    const out = (cloudValues || []).slice();
+    const ids = new Set(out.map(v => v.id)), names = new Set(out.map(v => String(v.name || '').trim().toLowerCase()));
+    for (const v of localValues || []) if (!ids.has(v.id) && !names.has(String(v.name || '').trim().toLowerCase())) out.push(v);
+    return out;
+  }
+  // Text bound for the cloud: Postgres refuses lone UTF-16 surrogates and \u0000 in JSON, so fix those first.
+  function wellFormed(str) {
+    if (typeof str.toWellFormed === 'function') return str.toWellFormed();
+    let out = '';
+    for (let i = 0; i < str.length; i++) {
+      const c = str.charCodeAt(i);
+      if (c >= 0xD800 && c <= 0xDBFF) { const d = str.charCodeAt(i + 1); if (d >= 0xDC00 && d <= 0xDFFF) { out += str[i] + str[i + 1]; i++; } else out += '\uFFFD'; }
+      else if (c >= 0xDC00 && c <= 0xDFFF) out += '\uFFFD';
+      else out += str[i];
+    }
+    return out;
+  }
+  function cleanForSync(v) {
+    if (typeof v === 'string') return wellFormed(v).replace(/\u0000/g, '');
+    if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+    if (Array.isArray(v)) return v.map(x => (x === undefined ? null : cleanForSync(x)));
+    if (v && typeof v === 'object') {
+      const o = {};
+      for (const k of Object.keys(v)) if (v[k] !== undefined && typeof v[k] !== 'function') o[cleanForSync(k)] = cleanForSync(v[k]);
+      return o;
+    }
+    return v;
+  }
+
   return {
     // config
     XP_BY_TIER, DEFAULT_TIER, LEVEL_BASE, LEVEL_EXP, TIER_LADDER, DAY_START_HOUR, TIER_RUBRIC, SCHEMA_VERSION, APP_ID,
@@ -1430,7 +1593,11 @@ var Game = (function () {
     buildCaptureRequest, parseCaptureResponse, buildPastePrompt,
     // seeds / backup
     seedLists, seedCategories: seedLists, seedSkills, seedAchievements, seedSkillAchievements, defaultSettings,
-    normalizeItem, normalizeState, upgradeToV2, stateVersion, buildBackup, validateBackup
+    normalizeItem, normalizeCategory, normalizeSkill, normalizeCompletion, normalizeAchievement,
+    normalizeState, upgradeToV2, stateVersion, buildBackup, validateBackup,
+    // sync
+    SYNC_STORES, SYNCED_SETTINGS, syncKey, splitSyncKey, syncedSettings, normalizeSyncedSettings, normalizeRecord,
+    syncStamp, syncNewer, decodeJwt, syncConfig, hasUserData, firstSyncPlan, mergePlan, mergeCoreValues, cleanForSync
   };
 })();
 

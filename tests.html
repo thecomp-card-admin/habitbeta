@@ -980,6 +980,133 @@ test('v1 → v3 in one pass', () => {
   assert.deepEqual(s.settings.pages, { planner: true, habits: true, review: true });
 });
 
+
+group('Sync');
+test('only shared settings sync — never device-only fields', () => {
+  const st = Object.assign(G.defaultSettings('2026-01-01T00:00:00Z'), { lastBackupAt: 'x', onboarded: true, apiKey: 'sk-ant-secret', plannerSetupDismissed: true, reviewDismissed: { 'annual-2026': true } });
+  const sub = G.syncedSettings(st);
+  assert.deepEqual(Object.keys(sub).sort(), ['aiSkillCheck', 'coreValues', 'dayStartHour', 'defaultCategoryId', 'model', 'pages', 'plannerSetupDismissed', 'reviewDismissed']);
+  assert.ok(!('apiKey' in sub) && !('lastBackupAt' in sub) && !('firstLaunchAt' in sub) && !('onboarded' in sub));
+  sub.pages.review = false; assert.equal(st.pages.review, true, 'a copy, not the live object');
+});
+test('settings from another device are checked field by field', () => {
+  const n = G.normalizeSyncedSettings({ dayStartHour: 30, model: '  claude-haiku-4-5-20251001 ', pages: { review: false, bogus: 1 }, aiSkillCheck: 'yes',
+    coreValues: [{ id: 'v1', name: 'Faith', questions: 'q', skillIds: ['sk_later'] }, { name: '  ' }], reviewDismissed: { a: true, b: false }, apiKey: 'sk-ant' });
+  assert.ok(!('dayStartHour' in n), 'out-of-range hour dropped');
+  assert.equal(n.model, 'claude-haiku-4-5-20251001');
+  assert.deepEqual(n.pages, { planner: true, habits: true, review: false });
+  assert.ok(!('aiSkillCheck' in n) && !('apiKey' in n));
+  assert.deepEqual(n.coreValues, [{ id: 'v1', name: 'Faith', questions: 'q', skillIds: ['sk_later'] }], 'skill links kept (the skill may arrive later)');
+  assert.deepEqual(n.reviewDismissed, { a: true });
+  assert.equal(G.normalizeSyncedSettings({ dayStartHour: 0 }).dayStartHour, 0);
+});
+test('records from another device: the row id wins, bad rows are skipped', () => {
+  const it = G.normalizeRecord('items', { id: 'other', text: 'Prayer', type: 'habit', repeat: { kind: 'daily' } }, 'i1', '2026-10-01');
+  assert.equal(it.id, 'i1'); assert.equal(it.type, 'habit'); assert.deepEqual(it.repeat.days, [0, 1, 2, 3, 4, 5, 6]);
+  assert.equal(G.normalizeRecord('categories', { name: 'Monday', days: [1] }, 'c1', TK).days.join(), '1');
+  assert.equal(G.normalizeRecord('categories', { name: 'Monday' }, 'c2', TK).days, null, 'no name-based day detection for v3 records');
+  assert.equal(G.normalizeRecord('completions', { itemId: 'i1', dayKey: '2026-10-01', tier: 2 }, 'x1', TK).xp, 25);
+  assert.equal(G.normalizeRecord('completions', { itemId: 'i1', dayKey: 'nope' }, 'x2', TK), null);
+  assert.equal(G.normalizeRecord('achievements', { name: 'A', kind: 'count', seedKey: 'getting-started' }, 'a1', TK).seedKey, 'getting-started');
+  assert.equal(G.normalizeRecord('reviews', { kind: 'annual', year: 2026, answers: { wentWell: 'yes' } }, 'annual-2026', TK).answers.wentWell, 'yes');
+  assert.equal(G.normalizeRecord('reviews', { kind: 'annual', year: 2026 }, 'annual-2025', TK), null, 'id must match kind + year');
+  assert.equal(G.normalizeRecord('skills', { name: 'Faith' }, 'sk_x', TK).name, 'Faith');
+  assert.equal(G.normalizeRecord('secrets', { value: 'k' }, 'anthropicKey', TK), null, 'unknown stores never load');
+  assert.equal(G.normalizeRecord('items', [1, 2], 'i9', TK), null);
+  assert.equal(G.normalizeRecord('items', null, 'i9', TK), null);
+});
+test('edit times always move forward', () => {
+  assert.equal(G.syncStamp(0, 1000), 1000);
+  assert.equal(G.syncStamp(5000, 1000), 5001, 'a behind clock still beats the version it saw');
+  assert.equal(G.syncStamp(undefined, 1234.9), 1234);
+});
+test('newest edit wins; exact ties go to the higher device id', () => {
+  assert.ok(G.syncNewer({ u: 2, v: 'a' }, { u: 1, v: 'z' }));
+  assert.ok(!G.syncNewer({ u: 1, v: 'z' }, { u: 2, v: 'a' }));
+  assert.ok(G.syncNewer({ u: 2, v: 'b' }, { u: 2, v: 'a' }));
+  assert.ok(!G.syncNewer({ u: 2, v: 'a' }, { u: 2, v: 'a' }), 'the same version is not newer (an echo of our own push)');
+  assert.ok(G.syncNewer({ u: 1, v: 'a' }, null)); assert.ok(!G.syncNewer(null, { u: 1 }));
+});
+test('config.js: off when blank, checked when filled in', () => {
+  assert.equal(G.syncConfig(undefined), null);
+  assert.equal(G.syncConfig({ supabaseUrl: '', supabasePublishableKey: '' }), null);
+  assert.deepEqual(G.syncConfig({ supabaseUrl: ' https://abcd1234.supabase.co/ ', supabasePublishableKey: 'sb_publishable_xyz' }), { url: 'https://abcd1234.supabase.co', key: 'sb_publishable_xyz' });
+  assert.deepEqual(G.syncConfig({ supabaseUrl: 'http://127.0.0.1:54321', supabasePublishableKey: 'k' }), { url: 'http://127.0.0.1:54321', key: 'k' });
+  assert.ok(/secret key/.test(G.syncConfig({ supabaseUrl: 'https://a.supabase.co', supabasePublishableKey: 'sb_secret_abc' }).error));
+  const b64 = o => btoa(JSON.stringify(o)).replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_');
+  const legacy = role => `${b64({ alg: 'HS256' })}.${b64({ role, iss: 'supabase' })}.sig`;
+  assert.ok(/secret key/.test(G.syncConfig({ supabaseUrl: 'https://a.supabase.co', supabasePublishableKey: legacy('service_role') }).error), 'legacy service_role key refused');
+  assert.equal(G.syncConfig({ supabaseUrl: 'https://a.supabase.co', supabasePublishableKey: legacy('anon') }).key, legacy('anon'), 'legacy anon key accepted');
+  assert.ok(/should look like/.test(G.syncConfig({ supabaseUrl: 'http://a.supabase.co', supabasePublishableKey: 'k' }).error), 'plain http refused');
+  assert.ok(/missing the publishable key/.test(G.syncConfig({ supabaseUrl: 'https://a.supabase.co' }).error));
+  assert.equal(G.decodeJwt(legacy('anon')).role, 'anon'); assert.equal(G.decodeJwt('nope'), null);
+});
+test('first sign-in: upload, download or ask', () => {
+  const fresh = { categories: G.seedLists('t'), skills: G.seedSkills('t'), achievements: G.seedAchievements('t', idGen), items: [], completions: [], reviews: [], settings: G.defaultSettings('t') };
+  assert.ok(!G.hasUserData(fresh), 'starter data only');
+  assert.ok(G.hasUserData(Object.assign({}, fresh, { items: [{ id: 'i' }] })));
+  assert.ok(G.hasUserData(Object.assign({}, fresh, { categories: fresh.categories.concat({ id: 'mine', name: 'Gym' }) })));
+  assert.ok(G.hasUserData(Object.assign({}, fresh, { settings: Object.assign({}, fresh.settings, { coreValues: [{ id: 'v', name: 'Faith' }] }) })));
+  assert.equal(G.firstSyncPlan(false, true), 'upload'); assert.equal(G.firstSyncPlan(false, false), 'upload');
+  assert.equal(G.firstSyncPlan(true, false), 'download'); assert.equal(G.firstSyncPlan(true, true), 'choose');
+});
+test('merge: the account wins shared records, this device adds the rest, starter achievements are not doubled', () => {
+  const state = {
+    categories: [{ id: 'list_reminders' }, { id: 'gym' }], skills: [{ id: 'sk_clarity' }], items: [{ id: 'i1' }, { id: 'i2' }],
+    completions: [{ id: 'x1' }],
+    achievements: [{ id: 'a-local', seedKey: 'getting-started', seriesId: 's1' }, { id: 's1-t2', seriesId: 's1', tier: 2 }, { id: 'a-mine', seriesId: 's9' }],
+    reviews: [{ id: 'annual-2026', updatedAt: '2026-10-02T00:00:00.000Z' }, { id: 'integrity-2026', updatedAt: '2026-06-01T00:00:00.000Z' }], settings: {}
+  };
+  const cloud = new Set(['categories:list_reminders', 'skills:sk_clarity', 'items:i1', 'items:gone', 'reviews:annual-2026', 'reviews:integrity-2026']);
+  const times = new Map([['annual-2026', '2026-10-01T00:00:00.000Z'], ['integrity-2026', '2026-07-01T00:00:00.000Z']]);
+  const p = G.mergePlan(state, cloud, new Set(['getting-started']), times);
+  assert.deepEqual(p.upload, ['categories:gym', 'items:i2', 'completions:x1', 'achievements:a-mine']);
+  assert.deepEqual(p.drop, [{ store: 'achievements', id: 'a-local' }, { store: 'achievements', id: 's1-t2' }], 'a dropped starter takes its later tiers with it');
+  assert.deepEqual(p.keepLocal, ['reviews:annual-2026'], 'the review written more recently here is kept');
+  assert.deepEqual(G.splitSyncKey('items:a:b'), { store: 'items', id: 'a:b' }); assert.equal(G.splitSyncKey('nokey'), null);
+});
+test('merge: core values from both, no doubles', () => {
+  const cloud = [{ id: 'v1', name: 'Faith' }, { id: 'v2', name: 'Health' }];
+  const local = [{ id: 'v1', name: 'Faith (old)' }, { id: 'v3', name: 'health' }, { id: 'v4', name: 'Craft' }];
+  assert.deepEqual(G.mergeCoreValues(cloud, local).map(v => v.id), ['v1', 'v2', 'v4']);
+});
+test('text bound for the cloud is cleaned (Postgres refuses lone surrogates and \\u0000)', () => {
+  const out = G.cleanForSync({ text: 'Pray \ud83d', notes: 'a\u0000b', e: '😀 ok', n: NaN, list: [1, undefined, 'x\udc00'], nested: { k: '\ud83d\ude00' } });
+  assert.deepEqual(out, { text: 'Pray \ufffd', notes: 'ab', e: '😀 ok', n: null, list: [1, null, 'x\ufffd'], nested: { k: '😀' } });
+  assert.ok(!JSON.stringify(out).includes('\\ud83d'));
+});
+test('a value name is cut by characters, never through an emoji', () => {
+  const v = G.normalizeCoreValue({ id: 'v', name: 'x'.repeat(59) + '😀😀' }, null);
+  assert.equal(Array.from(v.name).length, 60); assert.ok(v.name.endsWith('😀'));
+});
+test('custom days that are not a list fall back to every day instead of crashing', () => {
+  assert.deepEqual(G.normalizeRepeat({ kind: 'custom', days: '1,2' }).days, [0, 1, 2, 3, 4, 5, 6]);
+});
+test('starter data vs your own achievements', () => {
+  const seeds = G.seedAchievements('t', idGen);
+  const base = { categories: G.seedLists('t'), skills: G.seedSkills('t'), items: [], completions: [], reviews: [], settings: G.defaultSettings('t') };
+  assert.ok(!G.hasUserData(Object.assign({}, base, { achievements: seeds.concat({ id: 'tier2', seriesId: seeds[0].seriesId, tier: 2 }) })), 'a later tier of a starter achievement is still starter data');
+  assert.ok(G.hasUserData(Object.assign({}, base, { achievements: seeds.concat({ id: 'mine', seriesId: 'mine', name: '100 pushups' }) })));
+});
+test('next tiers get ids from their series, once', () => {
+  const st = { items: [{ id: 'h', type: 'habit', repeat: { kind: 'daily', days: [0, 1, 2, 3, 4, 5, 6] }, timesPerDay: 1, tier: 1, text: 'x' }], completions: [], achievements: [{ id: 'a', seriesId: 'ser', name: 'N {n}', kind: 'count', metric: 'completions', scope: { type: 'all' }, threshold: 1, autoTier: true, tier: 1, unlockedAt: null }], settings: G.defaultSettings('t'), categories: [], skills: [] };
+  st.completions.push({ id: 'c1', itemId: 'h', dayKey: '2026-10-01', kind: 'habit', tier: 1, xp: 10, at: '2026-10-01T10:00:00Z' });
+  const r = G.checkAchievements(st, D(2026, 10, 1));
+  assert.deepEqual(r.created.map(a => [a.id, a.tier]), [['ser-t2', 2]]);
+  st.achievements.push(Object.assign({}, r.created[0]));
+  st.achievements[0] = Object.assign({}, st.achievements[0], { unlockedAt: null });
+  assert.equal(G.checkAchievements(st, D(2026, 10, 1)).created.length, 0, 'tier 2 already exists (e.g. synced from another device)');
+});
+test('the per-record normalizers match what loading a whole backup does', () => {
+  const s = G.normalizeState(v2Data(), '2026-10-03', 'now', { idGen });
+  const back = s.categories.map(c => G.normalizeRecord('categories', JSON.parse(JSON.stringify(c)), c.id, '2026-10-03'));
+  assert.deepEqual(back, s.categories);
+  const items = s.items.map(i => G.normalizeRecord('items', JSON.parse(JSON.stringify(i)), i.id, '2026-10-03'));
+  assert.deepEqual(items, s.items);
+  const ach = s.achievements.map(a => G.normalizeRecord('achievements', JSON.parse(JSON.stringify(a)), a.id, '2026-10-03'));
+  assert.deepEqual(ach, JSON.parse(JSON.stringify(s.achievements)));
+});
+
 run();
 </script>
 </body>

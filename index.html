@@ -392,6 +392,13 @@ a { color: var(--tint); text-decoration: none; }
 .infocard .acts button { background: var(--fill); color: var(--tint); font-weight: 600; font-size: 15px; border-radius: 10px; padding: 9px 12px; min-height: 40px; }
 .infocard .acts button.primary { background: var(--tint); color: #fff; }
 .infocard .acts button.plain { background: none; color: var(--text2); }
+.delwarn { text-align: center; padding: 6px 8px 18px; }
+.delwarn .ic { font-size: 40px; line-height: 1; margin-bottom: 8px; }
+.delwarn .h { font-size: 20px; font-weight: 700; margin-bottom: 10px; word-wrap: break-word; }
+.delwarn ul { list-style: none; margin: 0; padding: 0; text-align: left; background: var(--card); border-radius: var(--radius); }
+.delwarn li { padding: 11px 14px; font-size: 15px; line-height: 1.35; position: relative; }
+.delwarn li + li::before { content: ''; position: absolute; left: 14px; right: 0; top: 0; height: .5px; background: var(--sep); }
+.delwarn li b { color: var(--danger); }
 /* habits page */
 .hcard { background: var(--card); border-radius: var(--radius); margin-bottom: 10px; padding: 10px 12px 10px 12px; }
 .hrow { display: flex; align-items: flex-start; gap: 10px; }
@@ -481,6 +488,15 @@ body.has-newrem .toast, body.has-newrem .boost { bottom: calc(var(--sab) + 136px
 .vlist .srcnote { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .obfoot { flex: none; padding: 10px 28px calc(var(--sab) + 12px); border-top: .5px solid var(--sep); background: var(--bg); }
 .obfoot .link { display: block; width: 100%; text-align: center; color: var(--tint); padding: 12px; }
+.sierr { color: var(--danger); font-size: 14px; min-height: 20px; margin: -6px 4px 10px; line-height: 1.35; }
+.duebanner .sbtn { width: auto; height: auto; padding: 7px 12px; border-radius: 999px; background: var(--tint); color: #fff; font-weight: 600; font-size: 14px; white-space: nowrap; }
+#si-form .fld input { width: 100%; }
+/* Computers and tablets: keep the phone layout as a centered column instead of stretching it edge to edge. */
+@media (min-width: 760px) {
+  #app { left: 50%; width: 720px; margin-left: -360px; border-left: .5px solid var(--sep); border-right: .5px solid var(--sep); }
+  .sheet { left: 50%; right: auto; width: 640px; margin-left: -320px; }
+  .banner { left: 50%; right: auto; width: 560px; margin-left: -280px; }
+}
 </style>
 </head>
 <body>
@@ -488,10 +504,11 @@ body.has-newrem .toast, body.has-newrem .boost { bottom: calc(var(--sab) + 136px
 <div id="sheet-root"></div>
 <input type="file" id="file-photo" accept="image/*" capture="environment" hidden>
 <input type="file" id="file-import" accept=".json,application/json" hidden>
+<script src="config.js"></script>
 <script src="game.js"></script>
 <script>
 'use strict';
-const APP_VERSION = '1.2.0';
+const APP_VERSION = '1.3.0';
 // 'stable' for the live app; 'beta' for the side-by-side test copy (own database, name, icon and cache).
 const CHANNEL = 'beta';
 const IS_BETA = CHANNEL === 'beta';
@@ -536,9 +553,10 @@ const reduceMotion = () => !!(window.matchMedia && window.matchMedia('(prefers-r
 
 // ---------- IndexedDB ----------
 const DB = (() => {
-  // v2 adds `skills`, v3 adds `reviews`. The beta keeps its own database so it never touches the live app's data.
-  const NAME = IS_BETA ? 'habit-tracker-beta' : 'habit-tracker', VERSION = 3;
-  const STORES = ['categories', 'items', 'completions', 'achievements', 'settings', 'secrets', 'skills', 'reviews'];
+  // v2 adds `skills`, v3 adds `reviews`, v4 adds `syncmeta` (what's waiting to sync). The beta keeps its own
+  // database so it never touches the live app's data.
+  const NAME = IS_BETA ? 'habit-tracker-beta' : 'habit-tracker', VERSION = 4;
+  const STORES = ['categories', 'items', 'completions', 'achievements', 'settings', 'secrets', 'skills', 'reviews', 'syncmeta'];
   let dbp = null;
   function open() {
     if (dbp) return dbp;
@@ -571,7 +589,10 @@ const DB = (() => {
   return { open, getAll, write, STORES, NAME };
 })();
 let writeQueue = Promise.resolve();
-function persist(ops) {
+// Every save goes through here. When sync is on, changed records are stamped and queued in the same transaction
+// ({ silent: true } skips that: writes that came from sync itself, upgrades, and sync bookkeeping).
+function persist(ops, opts) {
+  if (!(opts && opts.silent) && typeof Sync !== 'undefined') ops = ops.concat(Sync.track(ops));
   writeQueue = writeQueue.then(() => DB.write(ops)).catch(err => { console.error('persist failed', err); toast('Save failed: ' + (err && err.message || err)); });
   return writeQueue;
 }
@@ -680,7 +701,7 @@ function deleteItem(id, opts) {
   persist(doomed.map(d => ({ store: 'items', del: d.id })));
   if (!(opts && opts.silent)) {
     pendingUndo = { items: doomed };
-    toast('Deleted', { action: 'Undo', onAction: () => { if (!pendingUndo) return; const back = pendingUndo.items; pendingUndo = null; S.items.push(...back); persist(back.map(d => ({ store: 'items', put: d }))); render(); }, ms: 4000 });
+    toast((opts && opts.label) || 'Deleted', { action: 'Undo', onAction: () => { if (!pendingUndo) return; const back = pendingUndo.items; pendingUndo = null; const backIds = new Set(back.map(d => d.id)); S.items = S.items.filter(i => !backIds.has(i.id)).concat(back); persist(back.map(d => ({ store: 'items', put: d }))); render(); }, ms: 4000 });
   }
 }
 // date: the day a habit row stands for (day lists, week strip). Earlier days this week log late; upcoming days are locked.
@@ -1125,6 +1146,7 @@ function renderOnboarding() {
       <li><b>Every check-off boosts a skill</b> (prayer → Clarity, lifting → Strength) and your level. No cap.</li>
     </ol>
     <button class="btn primary" data-act="onboard-next">Get started</button>
+    ${Sync.cfg ? '<button class="btn" data-act="sync-signin">Sign in to sync</button>' : ''}
     <button class="link" data-act="import">Restore from a backup</button>
   </div></div>`;
 }
@@ -1223,6 +1245,7 @@ function renderLists() {
   app.innerHTML = `<div class="screen">
     <div class="nav"><div class="spacer"></div><button class="navbtn" data-act="capture" aria-label="Capture from photo">${ICONS.camera}</button><a class="navbtn" href="#/settings" aria-label="Settings">${ICONS.settings}</a></div>
     <div class="content tabbed">
+      ${syncBannerHTML()}
       ${backupNudgeHTML()}
       ${start ? startCardsHTML() : ''}
       <div class="smart" style="margin-top:4px">${tiles}</div>
@@ -1267,6 +1290,7 @@ function renderPlanner() {
     <div class="content tabbed">
       <div class="title-lg"><span>Planner</span></div>
       <div class="wkline">This week · ${esc(weekRangeLabel(tk))}</div>
+      ${syncBannerHTML()}
       ${backupNudgeHTML()}
       ${startCardsHTML()}
       ${setup}
@@ -1494,11 +1518,11 @@ function rowHTML(it, ctx, inst) {
   const color = inst && ctx.cat ? catColor(ctx.cat) : catColor(cat);
   const dateAttr = inst ? ` data-date="${day}"` : '';
   const label = future ? `Opens ${esc(Game.dayName(Game.weekdayOf(day)))}` : st.done ? 'Completed' : 'Complete';
-  // Appearances of a habit can't be swipe-deleted (that would delete the habit from every day).
+  // Every row can be swiped; deleting a habit (from any of its rows) asks first, since it removes it from every day.
   return `<div class="swipe" data-id="${it.id}"${dateAttr}><div class="row ${it.parentId && !ctx.flat ? 'sub' : ''} ${st.done ? 'done' : ''} ${future ? 'future' : ''}">
     <button class="checkwrap" data-act="${future ? 'locked' : 'toggle'}" data-id="${it.id}"${dateAttr} aria-label="${label}"><span class="check ${st.done ? 'done' : ''} ${partial ? 'partial' : ''} ${future ? 'locked' : ''} ${justDone.has(it.id + '|' + day) ? 'pop' : ''}" style="--c:${color}" data-n="${st.count}"></span></button>
     <div class="body" data-act="open" data-id="${it.id}"><div class="txt">${esc(it.text)}</div><div class="meta">${meta.join('')}</div></div>
-  </div>${inst ? '' : `<button class="row-del" data-act="delete" data-id="${it.id}">Delete</button>`}</div>`;
+  </div><button class="row-del" data-act="delete" data-id="${it.id}">Delete</button></div>`;
 }
 function familyHTML(roots, ctx) {
   return entriesHTML(roots.map(it => ({ item: it, date: null, inst: false })), ctx);
@@ -1692,7 +1716,7 @@ function flushReviewSave() {
   clearTimeout(reviewTimer);
   if (!reviewDirty) return;
   saveReview(reviewDirty); reviewDirty = null;
-  const n = $('#savednote'); if (n) n.textContent = 'Saved on this device';
+  const n = $('#savednote'); if (n) n.textContent = Sync.active() ? 'Saved' : 'Saved on this device';
 }
 const fmtMonthDay = k => Game.parseDay(k).toLocaleDateString(undefined, { month: 'long', day: 'numeric' });
 // Check-ins by month: one series, so one hue; the best month carries the accent and its value (emphasis form).
@@ -1788,7 +1812,7 @@ function renderReview() {
     <div class="content tabbed" id="reviewpage">
       <div class="title-lg"><span>Review</span></div>
       <div class="seg" style="margin:0 0 6px"><button class="${kind === 'annual' ? 'on' : ''}" data-act="review-tab" data-v="annual">Annual Review</button><button class="${kind === 'integrity' ? 'on' : ''}" data-act="review-tab" data-v="integrity">Integrity Report</button></div>
-      <div class="note" style="margin:0 0 12px;padding:0 4px">${kind === 'annual' ? 'A year-end look back: what went well, what didn’t, and what you’re working toward.' : 'A mid-year check: are you living by your core values?'} Saved on this device and in backups.</div>
+      <div class="note" style="margin:0 0 12px;padding:0 4px">${kind === 'annual' ? 'A year-end look back: what went well, what didn’t, and what you’re working toward.' : 'A mid-year check: are you living by your core values?'} Saved on this device${Sync.active() ? ', synced to your account' : ''} and in backups.</div>
       ${kind === 'annual' ? annualHTML(stats, review) : integrityHTML(stats, review)}
       <div class="savednote" id="savednote"></div>
       <button class="btn ${review.completedAt ? '' : 'primary'}" data-act="review-complete">${review.completedAt ? `Completed ${esc(new Date(review.completedAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }))} · Reopen` : `Mark ${RV.year} ${name} complete`}</button>
@@ -1874,11 +1898,41 @@ function valueSheet(id) {
     done() {
       if (!d.name.trim()) { toast('Give the value a name'); return false; }
       const v = Game.normalizeCoreValue(Object.assign({}, d, { name: d.name.trim() }), new Set(S.skills.map(s => s.id)));
-      const next = values.slice();
+      const next = (S.settings.coreValues || []).slice(); // the current list: values added or removed elsewhere stay
       const i = next.findIndex(x => x.id === v.id);
       if (i >= 0) next[i] = v; else next.push(v);
       saveSettings({ coreValues: next });
       return true;
+    }
+  };
+}
+
+// ---------- deleting a habit: warn first ----------
+// Tasks and sub-tasks delete straight away (with Undo). A habit asks first: it disappears from every day list,
+// the Planner and the Habits page, and its streak goes with it.
+function requestDelete(id) {
+  const it = itemById(id); if (!it) return;
+  if (it.type === 'habit' && !it.parentId) { closeAllRows(); Sheet.push(habitDeleteSheet(id)); return; }
+  deleteItem(id); render();
+}
+function habitDeleteSheet(id) {
+  return {
+    kind: 'habit-delete', id, title: '', left: 'Cancel', right: null,
+    render() {
+      const it = itemById(id); if (!it) return '<div class="empty">This habit no longer exists.</div>';
+      const tk = todayKey();
+      const st = Game.streak(it, IDX, tk);
+      const total = Game.completionsFor(IDX, it.id).length;
+      const kids = childrenOf(it.id).length;
+      const points = [
+        `It disappears from every day list, the Planner and the Habits page${kids ? `, with its ${kids} sub-task${kids === 1 ? '' : 's'}` : ''}.`,
+        st.current > 0 ? `Your <b>${st.current}-day streak</b> will be lost${st.best > st.current ? ` (best: ${st.best})` : ''}.`
+          : st.best > 1 ? `Its <b>best streak of ${st.best} days</b> will be lost.` : 'Its streak history will be lost.',
+        total ? `XP from its ${fmtNum(total)} past check-in${total === 1 ? '' : 's'} stays in your totals.` : ''
+      ].filter(Boolean);
+      return `<div class="delwarn"><div class="ic">⚠️</div><div class="h">Delete “${esc(it.text)}”?</div><ul>${points.map(p => `<li>${p}</li>`).join('')}</ul></div>
+        <button class="btn danger" data-act="habit-delete-confirm" data-id="${it.id}">Delete Habit</button>
+        <button class="btn" data-act="sheet-left">Keep Habit</button>`;
     }
   };
 }
@@ -1967,7 +2021,8 @@ async function renderSettings() {
     <div class="nav"><a class="navbtn" href="${back.href}" aria-label="Back">${ICONS.chevL}${esc(back.label)}</a><div class="spacer"></div></div>
     <div class="content">
       <div class="title-lg"><span>Settings</span></div>
-      <div class="group-h first">General</div>
+      ${syncSettingsHTML().replace('class="group-h"', 'class="group-h first"')}
+      <div class="group-h">General</div>
       <div class="grp">
         <div class="fld"><span class="l">Day starts at</span><select data-set="dayStartHour">${hours}</select></div>
         <div class="fld"><span class="l">Default list</span><select data-set="defaultCategoryId">${cats}</select></div>
@@ -2012,7 +2067,7 @@ async function renderSettings() {
 // ---------- sheets ----------
 const Sheet = {
   stack: [], root: $('#sheet-root'),
-  push(entry) { Boost.hide(); this.stack.push(entry); history.pushState({ sheet: this.stack.length }, ''); this.rerender(); },
+  push(entry) { Boost.hide(); if (activeToast) activeToast.kill(); this.stack.push(entry); history.pushState({ sheet: this.stack.length }, ''); this.rerender(); },
   replace(entry) { this.stack[this.stack.length - 1] = entry; this.rerender(); },
   pop() { if (!this.stack.length) return; history.back(); },
   closeAll() { if (this.stack.length) history.go(-this.stack.length); },
@@ -2047,9 +2102,11 @@ function flushSheetInputs() { const e = Sheet.top(); if (e && e.flush) e.flush()
 function itemSheet(id) {
   return {
     kind: 'item', id, title: 'Details', right: 'Done', left: Sheet.stack.length ? 'Back' : null,
-    flush() { const it = itemById(id); if (!it) return; const t = $('#f-text'), n = $('#f-notes'); const patch = {}; if (t && t.value.trim() && t.value.trim() !== it.text) patch.text = t.value.trim(); if (n && n.value !== it.notes) patch.notes = n.value; if (Object.keys(patch).length) updateItem(id, patch); const sub = $('#f-newsub'); if (sub && sub.value.trim()) { addItem({ text: sub.value.trim(), parentId: id }); sub.value = ''; } },
+    // Saves only what you changed in the fields, so an edit that synced in from another device meanwhile isn't undone.
+    flush() { const it = itemById(id); if (!it) return; const t = $('#f-text'), n = $('#f-notes'); const seen = this.seen || {}; const patch = {}; if (t && t.value.trim() && t.value.trim() !== seen.text && t.value.trim() !== it.text) patch.text = t.value.trim(); if (n && n.value !== seen.notes && n.value !== it.notes) patch.notes = n.value; if (Object.keys(patch).length) updateItem(id, patch); const sub = $('#f-newsub'); if (sub && sub.value.trim()) { addItem({ text: sub.value.trim(), parentId: id }); sub.value = ''; } },
     render() {
       const it = itemById(id); if (!it) return '<div class="empty">Item no longer exists</div>';
+      this.seen = { text: it.text, notes: it.notes };
       const tk = todayKey(), ib = Game.byId(S.items);
       const parent = it.parentId ? itemById(it.parentId) : null;
       const kids = childrenOf(it.id);
@@ -2097,8 +2154,8 @@ function itemSheet(id) {
       const due = root.querySelector('#f-due'); if (due) due.addEventListener('change', () => { updateItem(id, { due: due.value || null }); Sheet.rerender(); });
       const cat = root.querySelector('#f-cat'); if (cat) cat.addEventListener('change', () => { updateItem(id, { categoryId: cat.value || null }); Sheet.rerender(); refreshListBody(); });
       const skSel = root.querySelector('#f-skill'); if (skSel) skSel.addEventListener('change', () => { flushSheetInputs(); setItemSkill(id, skSel.value || null); Sheet.rerender(); refreshListBody(); });
-      const t = root.querySelector('#f-text'); if (t) t.addEventListener('change', () => { if (t.value.trim()) updateItem(id, { text: t.value.trim() }); });
-      const n = root.querySelector('#f-notes'); if (n) n.addEventListener('change', () => updateItem(id, { notes: n.value }));
+      const t = root.querySelector('#f-text'); if (t) t.addEventListener('change', () => { if (t.value.trim()) { updateItem(id, { text: t.value.trim() }); if (this.seen) this.seen.text = t.value.trim(); } });
+      const n = root.querySelector('#f-notes'); if (n) n.addEventListener('change', () => { updateItem(id, { notes: n.value }); if (this.seen) this.seen.notes = n.value; });
     },
     onClose() { }
   };
@@ -2110,6 +2167,7 @@ function categorySheet(id) {
   const draft = existing
     ? { name: existing.name, color: existing.color, icon: existing.icon, days: (existing.days || []).slice(), showOnPlanner: existing.showOnPlanner !== false, daysTouched: !sameDays(existing.days, Game.detectListDays(existing.name)) }
     : { name: '', color: 'blue', icon: '📋', days: [], showOnPlanner: true, daysTouched: false };
+  const orig = existing ? { name: existing.name, color: existing.color, icon: existing.icon, days: JSON.stringify(Game.normalizeDays(existing.days)), showOnPlanner: existing.showOnPlanner !== false } : null;
   // Naming a new list "Monday" or "Sat + Sun" makes it a day list (until you pick days yourself).
   const syncDays = () => { if (!draft.daysTouched) draft.days = Game.detectListDays(draft.name) || []; };
   const daysHTML = () => {
@@ -2140,8 +2198,16 @@ function categorySheet(id) {
       const name = draft.name.trim();
       if (!name) { toast('Give the list a name'); return false; }
       const spec = { name, color: draft.color, icon: draft.icon, days: draft.days, showOnPlanner: draft.showOnPlanner };
-      if (existing) updateCategory(existing.id, spec);
-      else addCategory(spec);
+      if (existing) {
+        // Only what you changed here, so changes synced in from another device while this was open stay.
+        const patch = {};
+        if (name !== orig.name) patch.name = name;
+        if (draft.color !== orig.color) patch.color = draft.color;
+        if (draft.icon !== orig.icon) patch.icon = draft.icon;
+        if (JSON.stringify(Game.normalizeDays(draft.days)) !== orig.days) patch.days = draft.days;
+        if (draft.showOnPlanner !== orig.showOnPlanner) patch.showOnPlanner = draft.showOnPlanner;
+        if (Object.keys(patch).length) updateCategory(existing.id, patch);
+      } else addCategory(spec);
       return true;
     }
   };
@@ -2149,6 +2215,7 @@ function categorySheet(id) {
 function skillSheet(id) {
   const existing = id ? skillById(id) : null;
   const draft = existing ? { name: existing.name, color: existing.color, icon: existing.icon, hint: existing.hint || '' } : { name: '', color: 'purple', icon: '⭐', hint: '' };
+  const orig = existing ? { name: existing.name, color: existing.color, icon: existing.icon, hint: (existing.hint || '').trim() } : null;
   return {
     kind: 'skill', id, draft, title: existing ? 'Edit Skill' : 'New Skill', right: 'Done',
     render() {
@@ -2173,8 +2240,14 @@ function skillSheet(id) {
     done() {
       const name = draft.name.trim();
       if (!name) { toast('Give the skill a name'); return false; }
-      if (existing) updateSkill(existing.id, { name, color: draft.color, icon: draft.icon, hint: draft.hint });
-      else addSkill({ name, color: draft.color, icon: draft.icon, hint: draft.hint });
+      if (existing) {
+        const patch = {};
+        if (name !== orig.name) patch.name = name;
+        if (draft.color !== orig.color) patch.color = draft.color;
+        if (draft.icon !== orig.icon) patch.icon = draft.icon;
+        if (draft.hint.trim() !== orig.hint) patch.hint = draft.hint;
+        if (Object.keys(patch).length) updateSkill(existing.id, patch);
+      } else addSkill({ name, color: draft.color, icon: draft.icon, hint: draft.hint });
       return true;
     }
   };
@@ -2230,14 +2303,18 @@ function achievementSheet(id) {
     },
     flush() { const n = $('#a-name'); if (n) d.name = n.value; const ic = $('#a-icon'); if (ic) d.icon = ic.value.trim() || '🏆'; const th = $('#a-threshold'); if (th) d.threshold = Math.max(1, Math.floor(Number(th.value) || 1)); },
     done() {
-      if (existing && existing.unlockedAt) return true;
+      const cur = existing ? S.achievements.find(a => a.id === existing.id) : null;
+      if ((existing && existing.unlockedAt) || (cur && cur.unlockedAt)) return true; // unlocked (maybe on another device meanwhile)
       if (!d.name.trim()) { toast('Give it a name'); return false; }
       if (d.kind !== 'count') delete d.metric;
       if (d.kind === 'level' && !['all', 'skill', 'anySkill', 'everySkill'].includes(d.scope.type)) d.scope = { type: 'all' };
       if (d.kind !== 'level' && (d.scope.type === 'anySkill' || d.scope.type === 'everySkill')) d.scope = { type: 'all' };
       if (d.kind === 'manual') { d.threshold = 1; d.autoTier = false; }
       if (d.kind === 'level') d.autoTier = false;
-      saveAchievement(d);
+      const edits = { name: d.name, icon: d.icon, kind: d.kind, metric: d.metric, scope: d.scope, threshold: d.threshold, autoTier: d.autoTier };
+      const rec = cur ? Object.assign({}, cur, edits) : d;
+      if (rec.kind !== 'count') delete rec.metric;
+      saveAchievement(rec);
       runAchievementChecks();
       return true;
     }
@@ -2418,8 +2495,11 @@ async function importBackupFile(file) {
   const v = Game.validateBackup(obj, todayKey(), nowIso());
   if (!v.ok) { toast(v.error, { ms: 4000 }); return; }
   const d = v.data;
-  if (!confirm(`Replace all current data${IS_BETA ? ' in the beta' : ''} with this backup?\n\n${d.categories.length} lists · ${d.skills.length} skills · ${d.items.length} items · ${d.completions.length} completions`)) return;
+  const linked = Sync.tracking(), synced = Sync.active();
+  if (!confirm(`Replace all current data${IS_BETA ? ' in the beta' : ''} with this backup?${linked ? `\n\nThis device syncs with ${Sync.st.email}, so this also replaces your synced data on every device${synced ? '' : ' the next time this device syncs'}.` : ''}\n\n${d.categories.length} lists · ${d.skills.length} skills · ${d.items.length} items · ${d.completions.length} completions`)) return;
+  if (synced) { try { await Sync.pull(); } catch (e) { /* offline: replace what this device knows about */ } }
   await replaceAllData(d);
+  if (synced) Sync.soon(0);
   toast(v.fromVersion < 2 ? 'Backup restored and sorted into skills' : v.fromVersion < Game.SCHEMA_VERSION ? 'Backup restored and upgraded' : 'Backup restored');
   runAchievementChecks();
   SkillAI.schedule(1500);
@@ -2441,9 +2521,11 @@ async function replaceAllData(d) {
   await persist(ops);
 }
 async function eraseAll() {
-  if (!confirm('Erase all lists, items, history and settings on this device? Export a backup first if you want to keep anything.')) return;
-  if (!confirm('This cannot be undone. Erase everything?')) return;
-  await persist(DB.STORES.map(s => ({ store: s, clear: true })));
+  const synced = Sync.signedIn();
+  if (!confirm(`Erase all lists, items, history and settings on this device?${synced ? ' You’ll be signed out; your synced data stays in your account.' : ' Export a backup first if you want to keep anything.'}`)) return;
+  if (!confirm('This cannot be undone. Erase everything on this device?')) return;
+  if (synced) await Sync.signOut();
+  await persist(DB.STORES.map(s => ({ store: s, clear: true })), { silent: true });
   location.hash = '';
   location.reload();
 }
@@ -2461,6 +2543,676 @@ async function copyPastePrompt() {
   const text = Game.buildPastePrompt(sortedCats(), sortedSkills());
   try { await navigator.clipboard.writeText(text); toast('Prompt copied — paste it into a Claude chat or project'); }
   catch (e) { prompt('Copy this prompt:', text); }
+}
+
+// ---------- sync (Supabase, app 1.3) ----------
+// Offline-first: IndexedDB stays this device's working copy. Every change is stamped and queued in `syncmeta`;
+// when signed in, the queue is pushed (newest edit wins, on the server too) and other devices' changes are pulled.
+// config.js holds only the Project URL and the publishable key. The session stays on this device (secrets store),
+// never in backups; the Anthropic API key never syncs.
+const SYNC_RAW = Game.syncConfig(window.HABITS_CONFIG);
+function syncErr(kind, message, status) { const e = new Error(message); e.kind = kind; e.status = status || 0; return e; }
+function agoText(isoStr) {
+  const t = Date.parse(isoStr); if (!t) return '';
+  const s = Math.max(0, Math.round((Date.now() - t) / 1000));
+  if (s < 60) return 'just now';
+  if (s < 3600) return `${Math.floor(s / 60)} min ago`;
+  if (s < 86400 && new Date(t).toDateString() === new Date().toDateString()) return 'at ' + new Date(t).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+  return relDate(isoStr);
+}
+function authMessage(status, j) {
+  const code = j && (j.error_code || j.code);
+  const raw = (j && (j.msg || j.error_description || j.message || j.error)) || '';
+  if (code === 'invalid_credentials' || /invalid login credentials/i.test(raw)) return 'Wrong email or password.';
+  if (code === 'email_not_confirmed' || /not confirmed/i.test(raw)) return 'This email isn’t confirmed yet. In Supabase: Authentication → Users → your user → confirm it, or turn off “Confirm email”.';
+  if (status === 429) return 'Too many tries. Wait a minute and try again.';
+  if (/invalid api key|no api key/i.test(raw)) return 'Supabase rejected the publishable key in config.js.';
+  if (/refresh token|session/i.test(raw)) return 'Your session ended. Sign in again.';
+  return typeof raw === 'string' && raw ? raw : `Sign-in failed (${status}).`;
+}
+// The refresh answers that really mean "this session is over" (anything else, like a rate limit, is worth retrying).
+const SESSION_OVER = /refresh_token_not_found|refresh_token_already_used|session_not_found|session_expired|user_not_found|bad_jwt|invalid refresh token|refresh token not found|already used|session not found/i;
+// fetch with a time limit, so a hung connection can't stall syncing.
+async function fetchT(url, opts, ms) {
+  const ctl = typeof AbortController === 'function' ? new AbortController() : null;
+  const timer = ctl ? setTimeout(() => ctl.abort(), ms || Sync.TIMEOUT_MS) : null;
+  try { return await fetch(url, Object.assign({}, opts, ctl ? { signal: ctl.signal } : {})); }
+  catch (e) { throw syncErr('offline', e && e.name === 'AbortError' ? 'Supabase didn’t answer in time.' : 'Can’t reach Supabase. Check your connection.'); }
+  finally { if (timer) clearTimeout(timer); }
+}
+const Sync = {
+  cfg: SYNC_RAW && SYNC_RAW.url ? SYNC_RAW : null,
+  cfgError: SYNC_RAW && SYNC_RAW.error ? SYNC_RAW.error : null,
+  meta: new Map(),       // 'store:id' → { id, u: edit time (ms), d: 1 waiting to upload, x: 1 deleted, v: device, p: 1 set aside }
+  st: null,              // { id:'syncState', deviceId, userId, email, url, cursor, initialized, lastSyncAt, lost }
+  session: null,         // { id:'syncSession', access_token, refresh_token, expires_at (s), user: { id, email } }
+  joining: null,         // { uid, email } while an account is being set up on this device (before it's linked)
+  settingsJson: '',      // shared settings as last saved or received, so only real changes get sent
+  status: 'off', error: null, running: false, again: false, timer: null, retryMs: 0, epoch: 0, needsUpdate: false,
+  PAGE: 1000, BATCH: 400, OVERLAP_MS: 120000, TIMEOUT_MS: 30000,
+
+  load(secrets, metaRows) {
+    this.st = secrets.find(s => s.id === 'syncState') || null;
+    this.session = secrets.find(s => s.id === 'syncSession') || null;
+    if (!this.st) {
+      this.st = { id: 'syncState', deviceId: Game.newId(), userId: null, email: null, url: null, cursor: null, initialized: false, lastSyncAt: null, lost: false };
+      persist([{ store: 'secrets', put: Object.assign({}, this.st) }], { silent: true });
+    }
+    this.meta = new Map(metaRows.map(m => [m.id, m]));
+    this.settingsJson = JSON.stringify(Game.syncedSettings(S.settings));
+    if (this.cfg && this.st.url && this.st.url !== this.cfg.url) {
+      // config.js now points at a different Supabase project: sign in there and choose what to keep, like a new account.
+      this.session = null; this.meta.clear();
+      Object.assign(this.st, { url: null, userId: null, email: null, cursor: null, initialized: false, lastSyncAt: null, lost: false });
+      persist([{ store: 'secrets', del: 'syncSession' }, { store: 'syncmeta', clear: true }, { store: 'secrets', put: Object.assign({}, this.st) }], { silent: true });
+    }
+    if (this.session && !this.linked()) {
+      // Signed in but never finished setting up (the app closed while choosing what to keep): start over at sign-in.
+      this.session = null;
+      persist([{ store: 'secrets', del: 'syncSession' }], { silent: true });
+    }
+    this.status = !this.cfg ? 'off' : this.active() ? 'idle' : this.st.lost ? 'expired' : 'signed-out';
+  },
+  linked() { return !!(this.session && this.session.user && this.st && this.st.userId && this.st.initialized && this.session.user.id === this.st.userId); },
+  tracking() { return !!(this.st && this.st.userId); },
+  active() { return !!(this.cfg && this.linked()); },
+  signedIn() { return this.active(); },
+  pendingCount() { let n = 0; for (const m of this.meta.values()) if (m.d) n++; return n; },
+  parkedCount() { let n = 0; for (const m of this.meta.values()) if (m.p && !m.d) n++; return n; },
+  saveState() { return persist([{ store: 'secrets', put: Object.assign({}, this.st) }], { silent: true }); },
+
+  // Called by persist(): stamp every changed record and queue it. Returns the syncmeta writes to add to the same transaction.
+  track(ops) {
+    if (!this.tracking()) return [];
+    const now = Date.now(), touched = new Map();
+    const mark = (k, deleted) => {
+      const m = this.meta.get(k) || { id: k };
+      m.u = Game.syncStamp(m.u, now); m.d = 1; m.x = deleted ? 1 : 0; m.v = this.st.deviceId; m.p = 0;
+      this.meta.set(k, m); touched.set(k, m);
+    };
+    for (const o of ops) {
+      if (!Game.SYNC_STORES.includes(o.store)) continue;
+      if (o.clear) {
+        if (o.store === 'settings') continue; // one record, always written straight back
+        for (const m of [...this.meta.values()]) if (!m.x && m.id.startsWith(o.store + ':')) mark(m.id, true);
+      } else if (o.del !== undefined) mark(Game.syncKey(o.store, o.del), true);
+      else if (o.store === 'settings') {
+        const json = JSON.stringify(Game.syncedSettings(o.put));
+        const m = this.meta.get('settings:settings');
+        if (json !== this.settingsJson || !m || m.x) { this.settingsJson = json; mark('settings:settings', false); }
+      } else if (o.put && o.put.id !== undefined) mark(Game.syncKey(o.store, o.put.id), false);
+    }
+    if (touched.size) this.soon();
+    return [...touched.values()].map(m => ({ store: 'syncmeta', put: Object.assign({}, m) }));
+  },
+  markAll(keys) {
+    const now = Date.now(), ops = [];
+    for (const k of keys) {
+      const m = this.meta.get(k) || { id: k };
+      m.u = Game.syncStamp(m.u, now); m.d = 1; m.x = 0; m.v = this.st.deviceId; m.p = 0;
+      this.meta.set(k, m); ops.push({ store: 'syncmeta', put: Object.assign({}, m) });
+    }
+    return ops;
+  },
+  allLocalKeys() {
+    const keys = [];
+    for (const store of Game.SYNC_STORES) if (store !== 'settings') for (const r of S[store]) keys.push(Game.syncKey(store, r.id));
+    keys.push('settings:settings');
+    return keys;
+  },
+
+  // ----- network -----
+  async authFetch(path, body, token) {
+    const r = await fetchT(`${this.cfg.url}/auth/v1/${path}`, {
+      method: 'POST', cache: 'no-store',
+      headers: Object.assign({ apikey: this.cfg.key, 'content-type': 'application/json' }, token ? { authorization: 'Bearer ' + token } : {}),
+      body: JSON.stringify(body || {})
+    });
+    let j = null; try { j = await r.json(); } catch (e) { /* empty or not JSON */ }
+    if (!r.ok) {
+      // A real Auth answer is JSON with a code or message; anything else (a proxy page, a rate limit) is worth retrying.
+      const fromAuth = !!(j && typeof j === 'object' && (j.error_code || j.msg || j.error_description || j.error || j.message));
+      const e = syncErr(fromAuth && r.status >= 400 && r.status < 500 && r.status !== 429 && r.status !== 408 ? 'auth' : 'server', authMessage(r.status, j), r.status);
+      e.over = e.kind === 'auth' && SESSION_OVER.test(`${(j && j.error_code) || ''} ${(j && (j.msg || j.error_description || j.message || j.error)) || ''}`);
+      throw e;
+    }
+    if (!j || typeof j !== 'object') throw syncErr('server', 'Supabase sent an unexpected reply.', r.status);
+    return j;
+  },
+  setSession(j) {
+    const claims = Game.decodeJwt(j && j.access_token) || {};
+    if (!j || !j.access_token || !j.refresh_token) throw syncErr('auth', 'Supabase sent an incomplete sign-in.');
+    const user = j.user || {};
+    const exp = Number(j.expires_at) || Number(claims.exp) || Math.floor(Date.now() / 1000) + (Number(j.expires_in) || 3600);
+    this.session = { id: 'syncSession', access_token: j.access_token, refresh_token: j.refresh_token, expires_at: exp, user: { id: user.id || claims.sub, email: user.email || claims.email || null } };
+    return persist([{ store: 'secrets', put: Object.assign({}, this.session) }], { silent: true });
+  },
+  // A valid access token, refreshed when it's about to expire. Refresh tokens are single-use, so tabs take turns.
+  async token(force) {
+    if (!this.session) throw syncErr('auth', 'Signed out.');
+    if (!force && this.session.expires_at * 1000 - Date.now() > 60000) return this.session.access_token;
+    const mine = this.session;
+    const run = async () => {
+      const stored = (await DB.getAll('secrets')).find(s => s.id === 'syncSession');
+      if (!stored || !stored.user || !mine.user || stored.user.id !== mine.user.id) {
+        if (this.session === mine) this.session = null; // signed out, or another tab signed in as someone else
+        throw syncErr('auth', 'Signed out.');
+      }
+      this.session = stored;
+      if (stored.refresh_token !== mine.refresh_token && stored.expires_at * 1000 - Date.now() > 60000) return stored.access_token; // another tab refreshed
+      let j;
+      try { j = await this.authFetch('token?grant_type=refresh_token', { refresh_token: stored.refresh_token }); }
+      catch (e) {
+        if (e.kind === 'auth' && e.over) { await this.dropSession(true); throw e; }
+        throw syncErr(e.kind === 'offline' ? 'offline' : 'server', e.message, e.status); // keep the session; try again later
+      }
+      await this.setSession(j);
+      return this.session.access_token;
+    };
+    return navigator.locks && navigator.locks.request ? navigator.locks.request(`habits-sync-auth-${CHANNEL}`, run) : run();
+  },
+  async rest(method, path, body, opts) {
+    opts = opts || {};
+    const tok = await this.token(false);
+    const r = await fetchT(`${this.cfg.url}/rest/v1/${path}`, {
+      method, cache: 'no-store', keepalive: !!opts.keepalive,
+      headers: { apikey: this.cfg.key, authorization: 'Bearer ' + tok, 'content-type': 'application/json', accept: 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body)
+    });
+    if (r.status === 401 && !opts.retried) { await this.token(true); return this.rest(method, path, body, Object.assign({}, opts, { retried: true })); }
+    const text = await r.text();
+    let j; try { j = text ? JSON.parse(text) : null; } catch (e) { j = undefined; }
+    if (!r.ok) {
+      const msg = (j && (j.message || j.msg || j.error)) || `HTTP ${r.status}`;
+      if (r.status === 401) { await this.dropSession(true); throw syncErr('auth', 'Your session ended. Sign in again.', 401); }
+      if (r.status === 404 || (j && ['PGRST202', 'PGRST205', '42P01', '42883'].includes(j.code))) throw syncErr('config', 'Supabase isn’t set up for sync yet: run supabase/setup.sql in the SQL Editor.', r.status);
+      throw syncErr(r.status >= 500 || r.status === 429 || r.status === 408 ? 'server' : 'http', msg, r.status);
+    }
+    if (j === undefined) throw syncErr('server', 'Supabase sent an unexpected reply (not JSON). A network filter may be in the way.', r.status);
+    return j;
+  },
+
+  // ----- push / pull -----
+  async push(opts, ep) {
+    for (let guard = 0; guard < 100; guard++) {
+      const batch = [];
+      for (const m of this.meta.values()) { if (m.d) { batch.push(m); if (batch.length >= this.BATCH) break; } }
+      if (!batch.length) return;
+      const items = this.rowsFor(batch);
+      if (items.length) await this.pushRows(items, opts, ep);
+    }
+  },
+  rowsFor(batch) {
+    const maps = {};
+    const find = (store, id) => {
+      if (store === 'settings') return Game.syncedSettings(S.settings);
+      if (!S[store]) return null;
+      if (!maps[store]) maps[store] = new Map(S[store].map(r => [r.id, r]));
+      return maps[store].get(id) || null;
+    };
+    const out = [];
+    for (const m of batch) {
+      const k = Game.splitSyncKey(m.id);
+      if (!k || k.id.length > 200 || !/^[a-z_]{1,40}$/.test(k.store)) { this.park(m, 'id the cloud can’t store'); continue; }
+      const data = m.x ? null : find(k.store, k.id);
+      out.push({ key: m.id, u: m.u, row: { store: k.store, id: k.id, data: data ? Game.cleanForSync(data) : null, deleted: !data, updated_at: m.u, device: m.v || this.st.deviceId, schema_version: Game.SCHEMA_VERSION } });
+    }
+    return out;
+  },
+  async pushRows(items, opts, ep) {
+    const body = { p_rows: items.map(x => x.row) };
+    let res;
+    try {
+      res = await this.rest('POST', 'rpc/push_records', body, { keepalive: !!(opts && opts.keepalive) && JSON.stringify(body).length < 60000 });
+    } catch (e) {
+      // One record the cloud refuses shouldn't hold up the rest: split the batch until it's found, then set it aside.
+      if (e.kind === 'http' && [400, 409, 413, 422].includes(e.status)) {
+        if (!(opts && opts.splitting)) {
+          // Is it the data or the service? An empty batch tells: if that fails too, nothing gets set aside.
+          await this.rest('POST', 'rpc/push_records', { p_rows: [] });
+          opts = Object.assign({}, opts, { splitting: true });
+        }
+        if (items.length === 1) { this.park(this.meta.get(items[0].key), e.message); return; }
+        const mid = Math.ceil(items.length / 2);
+        await this.pushRows(items.slice(0, mid), opts, ep);
+        await this.pushRows(items.slice(mid), opts, ep);
+        return;
+      }
+      throw e;
+    }
+    if (!res || typeof res !== 'object' || Array.isArray(res) || typeof res.saved !== 'number' || !Array.isArray(res.refused) || res.saved + res.refused.length !== items.length) {
+      throw syncErr('server', 'Supabase sent an unexpected reply. Run the latest supabase/setup.sql, or check for a network filter.');
+    }
+    if (ep !== undefined && ep !== this.epoch) throw syncErr('cancelled', 'Stopped.');
+    const ops = [];
+    for (const x of items) { const cur = this.meta.get(x.key); if (cur && cur.d && cur.u === x.u) { cur.d = 0; cur.p = 0; ops.push({ store: 'syncmeta', put: Object.assign({}, cur) }); } }
+    if (ops.length) await persist(ops, { silent: true });
+    if (res.refused.length) await this.applyRows(res.refused, ep); // the cloud had newer edits: take them
+  },
+  park(m, why) {
+    if (!m) return;
+    m.d = 0; m.p = 1;
+    persist([{ store: 'syncmeta', put: Object.assign({}, m) }], { silent: true });
+    console.warn('sync: set aside', m.id, why || '');
+  },
+  // Pages through the account's changes since `sinceIso` (null: everything), oldest first.
+  async fetchChanges(sinceIso, ep) {
+    const rows = [];
+    let seq = 0, newest = 0;
+    for (let guard = 0; guard < 10000; guard++) {
+      let q = `records?select=store,id,data,deleted,updated_at,device,schema_version,seq,synced_at&order=seq.asc&limit=${this.PAGE}&seq=gt.${seq}`;
+      if (sinceIso) q += `&synced_at=gte.${encodeURIComponent(sinceIso)}`;
+      const page = await this.rest('GET', q);
+      if (!Array.isArray(page)) throw syncErr('server', 'Supabase sent an unexpected reply.');
+      if (page.some(r => Number(r.schema_version) > Game.SCHEMA_VERSION)) throw syncErr('update', 'Another device has a newer version of the app. Update this one to keep syncing.');
+      if (ep !== undefined && ep !== this.epoch) throw syncErr('cancelled', 'Stopped.');
+      for (const r of page) { rows.push(r); seq = Math.max(seq, Number(r.seq) || 0); const t = Date.parse(r.synced_at); if (t > newest) newest = t; }
+      if (page.length < this.PAGE) break;
+    }
+    return { rows, newest: newest ? new Date(newest).toISOString() : null };
+  },
+  async pull(ep) {
+    // A 2-minute overlap catches writes that were still committing during the last pull.
+    const since = this.st.cursor ? new Date(Date.parse(this.st.cursor) - this.OVERLAP_MS).toISOString() : null;
+    const { rows, newest } = await this.fetchChanges(since, ep);
+    await this.applyRows(rows, ep);
+    if (newest && (!this.st.cursor || Date.parse(newest) > Date.parse(this.st.cursor))) { this.st.cursor = newest; await this.saveState(); }
+    return rows.length;
+  },
+  // Apply other devices' records where they're newer than this device's copy. opts.replace: this device's copy is
+  // replaced wholesale (first download), in the same transaction.
+  async applyRows(rows, ep, opts) {
+    const replace = !!(opts && opts.replace);
+    if (!rows.length && !replace) return 0;
+    if (rows.some(r => Number(r.schema_version) > Game.SCHEMA_VERSION)) throw syncErr('update', 'Another device has a newer version of the app. Update this one to keep syncing.');
+    if (ep !== undefined && ep !== this.epoch) throw syncErr('cancelled', 'Stopped.');
+    flushReviewSave(); // a review you're typing is saved first, so it counts as your newest edit
+    const tk = todayKey(), ops = [], idx = {}, touched = new Set();
+    if (replace) {
+      for (const s of Game.SYNC_STORES) if (s !== 'settings') { S[s] = []; ops.push({ store: s, clear: true }); }
+      this.meta.clear(); ops.push({ store: 'syncmeta', clear: true });
+    }
+    const index = store => idx[store] || (idx[store] = new Map(S[store].map((r, i) => [r.id, i])));
+    let settingsChanged = false;
+    for (const r of rows) {
+      try {
+        if (!Game.SYNC_STORES.includes(r.store) || r.id === undefined || r.id === null) continue;
+        const k = Game.syncKey(r.store, r.id);
+        const incoming = { u: Number(r.updated_at) || 0, v: r.device || '' };
+        if (!Game.syncNewer(incoming, this.meta.get(k))) continue;
+        if (r.store === 'settings') {
+          if (!r.deleted && r.data) {
+            Object.assign(S.settings, Game.normalizeSyncedSettings(r.data));
+            this.settingsJson = JSON.stringify(Game.syncedSettings(S.settings));
+            ops.push({ store: 'settings', put: S.settings });
+            settingsChanged = true;
+          }
+        } else if (r.deleted || !r.data) {
+          const i = index(r.store).get(r.id);
+          if (i !== undefined) { S[r.store].splice(i, 1); idx[r.store] = null; ops.push({ store: r.store, del: r.id }); }
+        } else {
+          const rec = Game.normalizeRecord(r.store, r.data, r.id, tk);
+          if (!rec) continue;
+          const i = index(r.store).get(rec.id);
+          if (i !== undefined) S[r.store][i] = rec;
+          else { S[r.store].push(rec); index(r.store).set(rec.id, S[r.store].length - 1); }
+          ops.push({ store: r.store, put: rec });
+        }
+        const m = { id: k, u: incoming.u, d: 0, x: r.deleted ? 1 : 0, v: incoming.v };
+        this.meta.set(k, m); ops.push({ store: 'syncmeta', put: m });
+        touched.add(k);
+      } catch (e) { console.warn('sync: skipped a record it couldn’t read', r && r.store, r && r.id, e); }
+    }
+    if (ops.length) await persist(ops, { silent: true });
+    if (touched.size || replace) this.afterRemote(touched, settingsChanged);
+    return touched.size;
+  },
+  afterRemote(touched) {
+    recompute();
+    if (!booted || !S.settings.onboarded) return;
+    const top = Sheet.top();
+    if (!top) { softRender(); return; }
+    if (route().view === 'list') refreshListBody();
+    // An item open in a sheet that changed on another device shows the new version, unless you're typing in it.
+    const a = document.activeElement;
+    const typing = a && Sheet.root.contains(a) && (a.tagName === 'TEXTAREA' || (a.tagName === 'INPUT' && !['checkbox', 'button', 'radio'].includes(a.type)));
+    if (top.kind === 'item' && touched && touched.has('items:' + top.id) && !typing) Sheet.rerender();
+  },
+
+  // ----- running -----
+  soon(ms) {
+    if (!this.active()) return;
+    clearTimeout(this.timer);
+    this.timer = setTimeout(() => this.run(), ms === undefined ? 800 : ms);
+  },
+  async run(opts) {
+    if (!this.active() || this.needsUpdate) return false;
+    if (this.running) { this.again = true; return false; }
+    clearTimeout(this.timer);
+    if (navigator.onLine === false) { this.setStatus('offline'); return false; }
+    const ep = this.epoch;
+    this.running = true;
+    this.setStatus('syncing');
+    try {
+      let pushErr = null;
+      try { await this.push(opts, ep); }
+      catch (e) { if (['offline', 'auth', 'update', 'cancelled', 'config'].includes(e.kind)) throw e; pushErr = e; } // still pull
+      if (!(opts && opts.pushOnly)) { await this.pull(ep); if (!pushErr) await this.push(undefined, ep); }
+      if (pushErr) throw pushErr;
+      this.st.lastSyncAt = nowIso();
+      await this.saveState();
+      this.retryMs = 0; this.error = null;
+      this.setStatus('synced');
+      return true;
+    } catch (e) {
+      if (e.kind === 'cancelled') return false;
+      this.error = e.message || String(e);
+      const kind = e.kind || 'http';
+      if (kind === 'auth') this.setStatus(this.session ? 'error' : 'expired');
+      else if (kind === 'update') { this.needsUpdate = true; clearTimeout(this.timer); this.setStatus('update'); }
+      else {
+        this.setStatus(kind === 'offline' ? 'offline' : 'error');
+        if (kind !== 'config') { this.retryMs = Math.min(300000, this.retryMs ? this.retryMs * 3 : 5000); this.timer = setTimeout(() => this.run(), this.retryMs); }
+      }
+      console.warn('sync failed:', this.error);
+      return false;
+    } finally {
+      this.running = false;
+      if (this.again) { this.again = false; this.soon(300); }
+    }
+  },
+  // Leaving the app: send what's waiting right away (keepalive lets the request finish in the background).
+  flushNow() { if (this.active() && this.pendingCount() && !this.running) this.run({ pushOnly: true, keepalive: true }); },
+  setStatus(s) {
+    const was = this.status;
+    this.status = s;
+    const el = $('#syncstatus'); if (el) el.textContent = this.statusText();
+    const loud = x => x === 'expired' || x === 'update';
+    if (loud(was) !== loud(s) && booted && !Sheet.top()) softRender();
+  },
+  statusText() {
+    const n = this.pendingCount(), p = this.parkedCount();
+    const waiting = n ? ` · ${n} change${n === 1 ? '' : 's'} waiting` : '';
+    const aside = p ? ` · ${p} item${p === 1 ? '' : 's'} couldn’t sync` : '';
+    switch (this.status) {
+      case 'syncing': return 'Syncing…';
+      case 'synced': return 'Synced ' + (this.st.lastSyncAt ? agoText(this.st.lastSyncAt) : '') + aside;
+      case 'idle': return (this.st.lastSyncAt ? 'Synced ' + agoText(this.st.lastSyncAt) : 'Ready') + waiting + aside;
+      case 'offline': return 'Offline' + waiting;
+      case 'expired': return 'Signed out. Sign in again to keep syncing.';
+      case 'update': return 'Update the app to keep syncing.';
+      case 'error': return 'Couldn’t sync: ' + (this.error || 'unknown error');
+      default: return '';
+    }
+  },
+
+  // ----- signing in and out -----
+  // → 'resumed' | 'upload' | 'download' (done) | 'choose' | 'switch' (the caller asks, then calls join or abandonJoin)
+  async signIn(email, password) {
+    if (!this.cfg) throw syncErr('config', this.cfgError || 'Sync isn’t set up in config.js.');
+    const j = await this.authFetch('token?grant_type=password', { email, password });
+    const claims = Game.decodeJwt(j.access_token) || {};
+    const uid = (j.user && j.user.id) || claims.sub;
+    if (!uid) throw syncErr('auth', 'Supabase didn’t say which account this is.');
+    this.epoch++; clearTimeout(this.timer); // nothing from an earlier session keeps running
+    await this.setSession(j);
+    const who = this.session.user.email || email;
+    if (this.st.userId === uid && this.st.initialized) {
+      Object.assign(this.st, { email: who, lost: false, url: this.cfg.url });
+      await this.saveState();
+      this.retryMs = 0; this.needsUpdate = false;
+      this.run();
+      return 'resumed';
+    }
+    // Not linked to this account yet: look before linking. Nothing is tracked or sent until the choice is made.
+    this.joining = { uid, email: who };
+    let probe;
+    try { probe = await this.rest('GET', 'records?select=id&deleted=eq.false&limit=1'); }
+    catch (e) { await this.abandonJoin(); throw e; }
+    if (!Array.isArray(probe)) { await this.abandonJoin(); throw syncErr('server', 'Supabase sent an unexpected reply.'); }
+    if (this.st.userId && this.st.userId !== uid) return 'switch';
+    const plan = Game.firstSyncPlan(probe.length > 0, Game.hasUserData(S));
+    if (plan === 'choose') return 'choose';
+    await this.join(plan);
+    return plan;
+  },
+  // Finish linking this device to the account being joined: 'upload' this device's data, 'download' the account's
+  // (also used when switching accounts), or 'merge' both. If anything fails, the device stays as it was, signed out.
+  async join(plan) {
+    const jn = this.joining;
+    if (!jn || !this.session || this.session.user.id !== jn.uid) throw syncErr('auth', 'Sign in again.');
+    try {
+      const link = { userId: jn.uid, email: jn.email, url: this.cfg.url, lost: false, initialized: true, lastSyncAt: null };
+      if (plan === 'upload') {
+        this.meta.clear();
+        Object.assign(this.st, link, { cursor: null });
+        await persist([{ store: 'syncmeta', clear: true }].concat(this.markAll(this.allLocalKeys()), [{ store: 'secrets', put: Object.assign({}, this.st) }]), { silent: true });
+      } else if (plan === 'download' || plan === 'switch') {
+        const { rows, newest } = await this.fetchChanges(null); // everything is fetched before anything here changes
+        if (plan === 'switch') Object.assign(S.settings, Game.syncedSettings(Game.defaultSettings(nowIso())));
+        await this.applyRows(rows, undefined, { replace: true });
+        const upload = [];
+        if (!S.categories.length && !S.skills.length) {
+          // An empty account: start it with the starter list, skills and achievements.
+          const t = nowIso();
+          S.categories = Game.seedLists(t); S.skills = Game.seedSkills(t); S.achievements = Game.seedAchievements(t);
+          await persist([...S.categories.map(c => ({ store: 'categories', put: c })), ...S.skills.map(x => ({ store: 'skills', put: x })), ...S.achievements.map(a => ({ store: 'achievements', put: a }))], { silent: true });
+          upload.push(...this.allLocalKeys());
+        }
+        Object.assign(this.st, link, { cursor: newest });
+        await persist(this.markAll(upload).concat([{ store: 'settings', put: S.settings }, { store: 'secrets', put: Object.assign({}, this.st) }]), { silent: true });
+        recompute();
+      } else if (plan === 'merge') {
+        const { rows, newest } = await this.fetchChanges(null);
+        const live = rows.filter(r => !r.deleted && r.data);
+        const cloudKeys = new Set(rows.map(r => Game.syncKey(r.store, r.id)));
+        const seedKeys = new Set(live.filter(r => r.store === 'achievements' && r.data.seedKey).map(r => r.data.seedKey));
+        const reviewTimes = new Map(live.filter(r => r.store === 'reviews').map(r => [r.id, r.data.updatedAt || null]));
+        const plan2 = Game.mergePlan(S, cloudKeys, seedKeys, reviewTimes);
+        const localValues = (S.settings.coreValues || []).slice();
+        if (plan2.drop.length) {
+          const ids = new Set(plan2.drop.map(d => d.id));
+          S.achievements = S.achievements.filter(a => !ids.has(a.id));
+          await persist(plan2.drop.map(d => ({ store: d.store, del: d.id })), { silent: true });
+        }
+        this.meta.clear();
+        await persist([{ store: 'syncmeta', clear: true }], { silent: true });
+        const keep = new Set(plan2.keepLocal);
+        await this.applyRows(rows.filter(r => !keep.has(Game.syncKey(r.store, r.id))));
+        const upload = plan2.upload.concat(plan2.keepLocal);
+        const values = Game.mergeCoreValues(S.settings.coreValues || [], localValues);
+        if (values.length !== (S.settings.coreValues || []).length || !rows.some(r => r.store === 'settings')) { S.settings.coreValues = values; upload.push('settings:settings'); }
+        this.settingsJson = JSON.stringify(Game.syncedSettings(S.settings));
+        Object.assign(this.st, link, { cursor: newest });
+        await persist(this.markAll(upload).concat([{ store: 'settings', put: S.settings }, { store: 'secrets', put: Object.assign({}, this.st) }]), { silent: true });
+        recompute();
+      } else throw syncErr('auth', 'Unknown choice.');
+    } catch (e) {
+      await this.abandonJoin();
+      throw e;
+    }
+    this.joining = null;
+    this.retryMs = 0; this.needsUpdate = false;
+    await this.run();
+  },
+  async abandonJoin() { this.joining = null; await this.signOut(); },
+  async dropSession(lost) {
+    this.epoch++;
+    this.session = null;
+    clearTimeout(this.timer);
+    if (this.st && this.st.userId) this.st.lost = !!lost;
+    await persist([{ store: 'secrets', del: 'syncSession' }].concat(this.st ? [{ store: 'secrets', put: Object.assign({}, this.st) }] : []), { silent: true });
+    this.setStatus(lost ? 'expired' : 'signed-out');
+  },
+  async signOut() {
+    const tok = this.session && this.session.access_token;
+    this.epoch++; // stop anything in flight from writing after this
+    if (tok && this.cfg) {
+      try { await fetchT(`${this.cfg.url}/auth/v1/logout?scope=local`, { method: 'POST', cache: 'no-store', headers: { apikey: this.cfg.key, authorization: 'Bearer ' + tok } }, 8000); }
+      catch (e) { /* offline: the session simply expires */ }
+    }
+    await this.dropSession(false);
+  },
+  start() {
+    if (this.active()) this.run();
+    setInterval(() => { if (booted && document.visibilityState === 'visible') this.run(); }, 60000);
+  }
+};
+
+// ----- sync UI -----
+function syncSettingsHTML() {
+  if (!Sync.cfg) {
+    return `<div class="group-h">Sync</div>
+      <div class="grp"><div class="fld"><span class="l">Sync</span><span class="v">Off</span></div></div>
+      <div class="note">${Sync.cfgError ? esc(Sync.cfgError) : 'Everything stays on this device. To use the same data on your phone and computers, set up a free Supabase project and add it to <b>config.js</b> (README → Sync).'}</div>`;
+  }
+  if (!Sync.signedIn()) {
+    const lost = Sync.st && Sync.st.userId && Sync.st.lost;
+    return `<div class="group-h">Sync</div>
+      <div class="grp"><button class="fld tap" data-act="sync-signin" style="width:100%;text-align:left"><span class="l action">${lost ? 'Sign in again…' : 'Sign in to sync…'}</span>${lost ? '<span class="v">Paused</span>' : ''}</button></div>
+      <div class="note">Keeps your lists, habits and history the same on every device you sign in on. Changes save here first and sync when you're online. Your API key never syncs.</div>`;
+  }
+  return `<div class="group-h">Sync</div>
+    <div class="grp">
+      <div class="fld"><span class="l">Account</span><span class="v">${esc(Sync.st.email || '')}</span></div>
+      <div class="fld"><span class="l">Status</span><span class="v" id="syncstatus">${esc(Sync.statusText())}</span></div>
+      <button class="fld tap" data-act="sync-now" style="width:100%;text-align:left"><span class="l action">Sync now</span></button>
+      <button class="fld tap" data-act="sync-signout" style="width:100%;text-align:left"><span class="l danger">Sign out…</span></button>
+    </div>
+    <div class="note">Changes save on this device first and sync when you're online. Your API key stays on this device, and backups still export from here.</div>`;
+}
+function syncBannerHTML() {
+  if (!Sync.cfg || !Sync.st) return '';
+  if (Sync.status === 'update') return `<div class="duebanner"><span class="ic">⬆️</span><span class="t"><b>Update to keep syncing</b><span style="color:var(--text2)">Another device has a newer version.</span></span><button class="sbtn" data-act="sync-reload">Reload</button></div>`;
+  if (Sync.st.userId && Sync.st.initialized && !Sync.session && Sync.st.lost) return `<div class="duebanner"><span class="ic">🔄</span><span class="t"><b>Sync is paused</b><span style="color:var(--text2)">Your session ended. Changes stay here until you sign in.</span></span><button class="sbtn" data-act="sync-signin">Sign in</button></div>`;
+  return '';
+}
+function syncSignInSheet() {
+  return {
+    kind: 'sync-signin', title: 'Sign In to Sync', left: 'Cancel', right: null,
+    render() {
+      return `<div class="note" style="margin:0 0 12px;padding:0 4px">Use the account you created in your Supabase project (Authentication → Users).</div>
+        <form id="si-form" autocomplete="on" novalidate>
+          <div class="grp">
+            <div class="fld"><input type="email" id="si-email" name="email" placeholder="Email" autocomplete="username" autocapitalize="off" autocorrect="off" spellcheck="false" inputmode="email" value="${esc((Sync.st && Sync.st.email) || '')}"></div>
+            <div class="fld"><input type="password" id="si-pass" name="password" placeholder="Password" autocomplete="current-password"></div>
+          </div>
+          <div class="sierr" id="si-err" role="alert"></div>
+          <button type="submit" class="btn primary" id="si-go">Sign In</button>
+        </form>
+        <div class="note" style="margin-top:12px;padding:0 4px">Connects to ${esc(Sync.cfg ? Sync.cfg.url.replace(/^https?:\/\//, '') : '')}.</div>`;
+    },
+    mounted(root) {
+      const form = root.querySelector('#si-form');
+      const email = root.querySelector('#si-email'), pass = root.querySelector('#si-pass');
+      setTimeout(() => (email.value ? pass : email).focus(), 60);
+      form.addEventListener('submit', e => { e.preventDefault(); submitSignIn(); });
+    }
+  };
+}
+async function submitSignIn() {
+  const email = $('#si-email'), pass = $('#si-pass'), btn = $('#si-go'), err = $('#si-err');
+  if (!email || !pass || !btn || btn.disabled) return;
+  const e = email.value.trim(), p = pass.value;
+  if (!e || !p) { err.textContent = 'Enter your email and password.'; return; }
+  btn.disabled = true; btn.textContent = 'Signing in…'; err.textContent = '';
+  try {
+    const plan = await Sync.signIn(e, p);
+    const top = Sheet.top(), onSheet = !!(top && top.kind === 'sync-signin');
+    if (plan === 'choose' || plan === 'switch') {
+      const next = plan === 'choose' ? firstSyncSheet() : switchSheet();
+      if (onSheet) Sheet.replace(next); else Sheet.push(next);
+      return;
+    }
+    if (onSheet) Sheet.pop();
+    toast(plan === 'upload' ? 'Signed in. Uploading this device’s data…' : plan === 'download' ? 'Signed in. Your data is here.' : 'Signed in. Syncing…', { ms: 3000 });
+    afterSignIn(plan);
+  } catch (x) {
+    const b = $('#si-go'), er = $('#si-err');
+    if (b) { b.disabled = false; b.textContent = 'Sign In'; }
+    if (er) er.textContent = x.message || String(x); else toast(x.message || String(x), { ms: 5000 });
+  }
+}
+function afterSignIn(plan) {
+  if (!S.settings.onboarded) {
+    if (plan === 'upload') { onboardStep = 'habits'; render(); return; } // a brand-new account: carry on with setup
+    finishOnboarding();
+    return;
+  }
+  render();
+}
+function joinSheet(kind, title, body, buttons) {
+  return {
+    kind, title, left: null, right: null, busy: false,
+    render() { return body() + buttons.map(b => `<button class="btn ${b.cls || ''}" data-act="sync-join" data-v="${b.v}">${esc(b.label)}</button>${b.note ? `<div class="note" style="margin:6px 0 14px">${b.note}</div>` : ''}`).join(''); },
+    onClose() { if (!this.busy && Sync.joining) Sync.abandonJoin().then(() => render()); }
+  };
+}
+function firstSyncSheet() {
+  return joinSheet('sync-first', 'Both Have Data',
+    () => `<div class="note" style="margin:0 0 14px;padding:0 4px">Your account already has synced data, and this device has its own (${fmtNum(S.items.length)} item${S.items.length === 1 ? '' : 's'}, ${fmtNum(S.completions.length)} check-in${S.completions.length === 1 ? '' : 's'}). Choose what to keep:</div>`,
+    [{ v: 'download', label: 'Use My Account’s Data', cls: 'primary', note: 'Replaces this device’s lists, habits and history with your synced copy. Export a backup first if you might need what’s here.' },
+     { v: 'merge', label: 'Merge This Device In', note: 'Keeps both. Where both have the same item, your account’s version wins (a review you edited more recently here is kept). A habit set up on both may show twice; use Merge into one.' },
+     { v: 'cancel', label: 'Cancel and Sign Out' }]);
+}
+function switchSheet() {
+  return joinSheet('sync-switch', 'Different Account',
+    () => {
+      const n = Sync.pendingCount();
+      return `<div class="note" style="margin:0 0 14px;padding:0 4px">This device syncs with <b>${esc(Sync.st.email || 'another account')}</b>. Signing in as <b>${esc((Sync.joining && Sync.joining.email) || '')}</b> replaces what’s on this device with that account’s data.${n ? ` ${n} change${n === 1 ? '' : 's'} here never reached ${esc(Sync.st.email || 'the other account')} and will be lost.` : ''}</div>`;
+    },
+    [{ v: 'switch', label: 'Replace This Device’s Data', cls: 'primary', note: 'Nothing from this device is copied into the new account.' },
+     { v: 'cancel', label: 'Cancel and Sign Out' }]);
+}
+async function chooseJoin(v, btn) {
+  const sheet = Sheet.top(); if (!sheet || !['sync-first', 'sync-switch'].includes(sheet.kind) || sheet.busy) return;
+  sheet.busy = true;
+  document.querySelectorAll('[data-act="sync-join"]').forEach(b => { b.disabled = true; });
+  if (btn) btn.textContent = v === 'cancel' ? 'Signing out…' : 'Working…';
+  try {
+    if (v === 'cancel') await Sync.abandonJoin();
+    else await Sync.join(v);
+    Sheet.pop();
+    if (v !== 'cancel') { toast(v === 'merge' ? 'Merged. Syncing…' : 'Your synced data is here.', { ms: 3000 }); afterSignIn(v); }
+    else render();
+  } catch (x) {
+    // join() already signed out and left this device as it was.
+    sheet.busy = true; // keep onClose from signing out twice
+    Sheet.pop();
+    toast('Couldn’t finish: ' + (x.message || x), { ms: 5000 });
+    render();
+  }
+}
+function syncSignOutSheet() {
+  return {
+    kind: 'sync-signout', title: 'Sign Out', left: 'Cancel', right: null, busy: false,
+    render() {
+      const n = Sync.pendingCount();
+      return `<div class="note" style="margin:0 0 14px;padding:0 4px">Signed in as <b>${esc(Sync.st.email || '')}</b>.${n ? ` ${n} change${n === 1 ? ' hasn’t' : 's haven’t'} synced yet; they’ll wait on this device.` : ''}</div>
+        <button class="btn" data-act="sync-signout-go" data-v="keep">Sign Out</button>
+        <div class="note" style="margin:6px 0 14px">Stops syncing. This device keeps its copy; sign in again anytime to catch up.</div>
+        <button class="btn danger" data-act="sync-signout-go" data-v="erase">Sign Out and Erase This Device</button>
+        <div class="note" style="margin:6px 0 0">For a shared or work computer. Your synced data stays in your account.</div>`;
+    }
+  };
+}
+async function signOutChoice(v) {
+  const sheet = Sheet.top(); if (!sheet || sheet.kind !== 'sync-signout' || sheet.busy) return;
+  if (v === 'erase') {
+    const n = Sync.pendingCount();
+    if (!confirm(`Erase all data on this device and sign out?${n ? `\n\n${n} change${n === 1 ? '' : 's'} that haven’t synced will be lost.` : ''}`)) return;
+  }
+  sheet.busy = true;
+  await Sync.signOut();
+  if (v === 'erase') {
+    await persist(DB.STORES.map(s => ({ store: s, clear: true })), { silent: true });
+    location.hash = '';
+    location.reload();
+    return;
+  }
+  Sheet.pop();
+  toast('Signed out. This device keeps its copy.');
+  render();
 }
 
 // ---------- Claude skill check (background) ----------
@@ -2646,7 +3398,14 @@ document.addEventListener('click', e => {
     case 'locked': lockedToast(t.dataset.date, todayKey()); break;
     case 'open': Sheet.push(itemSheet(id)); break;
     case 'open-sub': flushSheetInputs(); Sheet.push(itemSheet(id)); break;
-    case 'delete': deleteItem(id); render(); break;
+    case 'delete': requestDelete(id); break;
+    case 'habit-delete-confirm': {
+      const it = itemById(id); if (!it) { Sheet.pop(); break; }
+      const name = it.text;
+      deleteItem(id, { label: `Deleted “${name.length > 24 ? name.slice(0, 23) + '…' : name}”` });
+      if (Sheet.stack.length > 1) Sheet.closeAll(); else Sheet.pop();
+      break;
+    }
     case 'uncomplete': removeCompletions([t.dataset.cid]); render(); break;
     case 'add-list': Sheet.push(categorySheet(null)); break;
     case 'list-menu': Sheet.push(menuSheet(catById(id) ? catById(id).name : 'List', [
@@ -2702,7 +3461,7 @@ document.addEventListener('click', e => {
     case 'f-tpd': { const it = itemById(Sheet.top().id); if (!it) break; updateItem(it.id, { timesPerDay: Math.min(99, Math.max(1, it.timesPerDay + (+t.dataset.v))) }); Sheet.rerender(); refreshListBody(); break; }
     case 'f-due-clear': updateItem(Sheet.top().id, { due: null }); Sheet.rerender(); refreshListBody(); break;
     case 'f-due-today': updateItem(Sheet.top().id, { due: todayKey() }); Sheet.rerender(); refreshListBody(); break;
-    case 'f-delete': { const s = Sheet.top(); const it = itemById(s.id); if (!it) break; const n = childrenOf(it.id).length; if (n && !confirm(`Delete this and its ${n} sub-task${n === 1 ? '' : 's'}?`)) break; deleteItem(s.id); Sheet.pop(); break; }
+    case 'f-delete': { const s = Sheet.top(); const it = itemById(s.id); if (!it) break; if (it.type === 'habit' && !it.parentId) { flushSheetInputs(); Sheet.push(habitDeleteSheet(it.id)); break; } const n = childrenOf(it.id).length; if (n && !confirm(`Delete this and its ${n} sub-task${n === 1 ? '' : 's'}?`)) break; deleteItem(s.id); Sheet.pop(); break; }
     // category sheet
     case 'c-color': Sheet.top().draft.color = t.dataset.v; Sheet.rerender(); break;
     case 'c-icon': Sheet.top().draft.icon = t.dataset.v; Sheet.rerender(); break;
@@ -2728,6 +3487,13 @@ document.addEventListener('click', e => {
     case 'key-save': saveApiKey($('#apikey').value); break;
     case 'key-clear': clearApiKey(); break;
     case 'copy-prompt': copyPastePrompt(); break;
+    // sync
+    case 'sync-signin': if (Sync.cfg) Sheet.push(syncSignInSheet()); break;
+    case 'sync-now': Sync.retryMs = 0; Sync.run().then(ok => toast(ok ? 'Synced' : Sync.statusText(), { ms: ok ? 1500 : 4000 })); break;
+    case 'sync-signout': Sheet.push(syncSignOutSheet()); break;
+    case 'sync-signout-go': signOutChoice(t.dataset.v); break;
+    case 'sync-join': chooseJoin(t.dataset.v, t); break;
+    case 'sync-reload': location.reload(); break;
   }
 });
 document.addEventListener('change', e => {
@@ -2761,10 +3527,11 @@ window.addEventListener('focusin', () => { setTimeout(() => window.scrollTo(0, 0
 let lastTk = null;
 setInterval(() => { if (!booted) return; const tk = todayKey(); if (tk !== lastTk) { lastTk = tk; softRender(); } }, 60000);
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'hidden') flushReviewSave();
-  if (document.visibilityState === 'visible' && booted) { softRender(); SkillAI.schedule(1500); }
+  if (document.visibilityState === 'hidden') { flushReviewSave(); if (booted) Sync.flushNow(); }
+  if (document.visibilityState === 'visible' && booted) { softRender(); SkillAI.schedule(1500); Sync.retryMs = 0; Sync.run(); }
 });
-window.addEventListener('online', () => { if (booted) SkillAI.schedule(1000); });
+window.addEventListener('online', () => { if (booted) { SkillAI.schedule(1000); Sync.retryMs = 0; Sync.run(); } });
+window.addEventListener('offline', () => { if (booted && Sync.active()) Sync.setStatus('offline'); });
 
 // ---------- service worker (offline + update toast) ----------
 if ('serviceWorker' in navigator) {
@@ -2783,7 +3550,7 @@ if ('serviceWorker' in navigator) {
 async function boot() {
   try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {}); } catch (e) { /* ignore */ }
   if (IS_BETA) { const b = document.createElement('div'); b.className = 'beta-badge'; b.textContent = 'BETA'; document.body.appendChild(b); }
-  const [categories, items, completions, achievements, settings, secrets, skills, reviews] = await Promise.all(DB.STORES.map(s => DB.getAll(s)));
+  const [categories, items, completions, achievements, settings, secrets, skills, reviews, syncmeta] = await Promise.all(DB.STORES.map(s => DB.getAll(s)));
   const t = nowIso();
   S.settings = settings.find(s => s.id === 'settings') || null;
   const fresh = !S.settings && !categories.length;
@@ -2816,10 +3583,11 @@ async function boot() {
         ...S.completions.map(c => ({ store: 'completions', put: c })),
         { store: 'achievements', clear: true }, ...S.achievements.map(a => ({ store: 'achievements', put: a })),
         { store: 'settings', put: S.settings }
-      ]);
-    } else if (!hadFirstLaunch) persist([{ store: 'settings', put: S.settings }]);
+      ], { silent: true }); // every device upgrades its own copy; upgrades aren't edits to sync
+    } else if (!hadFirstLaunch) persist([{ store: 'settings', put: S.settings }], { silent: true });
   }
   const key = secrets.find(s => s.id === 'anthropicKey'); S.apiKey = key ? key.value : null;
+  Sync.load(secrets, syncmeta);
   recompute();
   lastTk = todayKey();
   lastRoot = Game.startPage(S.settings);
@@ -2831,6 +3599,7 @@ async function boot() {
     toast(days ? `New: Planner, Habits and Review. Your ${days} day list${days === 1 ? '' : 's'} now fill with your habits.` : 'New: Planner, Habits and Review tabs.', { ms: 5000 });
   }
   SkillAI.schedule(migratedFrom ? 2500 : 1500);
+  Sync.start();
 }
 boot().catch(err => { console.error(err); app.innerHTML = `<div class="screen"><div class="intro"><h1>Couldn't start</h1><p>${esc(err && err.message || err)}</p><p>If this keeps happening, the browser may be blocking storage (private mode?).</p></div></div>`; });
 </script>
